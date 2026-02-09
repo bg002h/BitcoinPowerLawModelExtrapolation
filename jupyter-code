@@ -1,13 +1,14 @@
 # Bitcoin Monthly Prices — Linear + Log-Log + Power-Law Fit & 20-Year Projection
-# Y-axis: major grid at EVERY power of 10 + minor grid at 2×–9×
-# FIXED: floating-point exponentiation to avoid ValueError on negative powers
+# NOW WITH SEPARATE THIRD PLOT FOR SHADING (68% & 95% prediction intervals)
 # Juno notebook compatible — February 2026
 
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.stats import linregress
-from matplotlib.ticker import FixedLocator, ScalarFormatter
+from scipy.stats import linregress, t
+
+
+from matplotlib.ticker import FixedLocator, StrMethodFormatter, NullFormatter
 
 # ── CHANGE THIS TO YOUR ACTUAL FILE PATH ─────────────────────────
 csv_path = './bitcoin/BitcoinMonthlyPricesD.csv'
@@ -55,30 +56,28 @@ plt.xticks(rotation=45, ha='right')
 plt.tight_layout()
 plt.show()
 
-# ── Prepare data for log-log plot ─────────────────────────────────
+# ── Prepare data for log-log plots ────────────────────────────────
 valid = y_data > 0
 y_valid = y_data[valid]
 x_dates_valid = x_dates[valid]
 
-# Years since Bitcoin genesis (2009-01-03)
 genesis = pd.to_datetime('2009-01-03')
 years_since = (x_dates_valid - genesis).dt.days / 365.25
 years_valid = years_since.astype(float)
 
-# Filter to start from ~1 year onward
-MIN_YEARS=1.0
+MIN_YEARS = 1.0
 reasonable = years_valid >= MIN_YEARS
 years_log = years_valid[reasonable]
 y_log     = y_valid[reasonable]
 
-# ── Log-Log Plot + Power-Law Fit + 20-Year Projection ─────────────
+# ── Compute fit once (shared by both plots) ───────────────────────
 if len(y_log) < 10:
     print("Not enough positive data points for fitting (after year 1 filter).")
 else:
     log_x = np.log10(years_log)
     log_y = np.log10(y_log)
 
-    slope, intercept, r_value, _, _ = linregress(log_x, log_y)
+    slope, intercept, r_value, pvalue, std_err = linregress(log_x, log_y)
     B = slope
     A = 10 ** intercept
 
@@ -86,245 +85,157 @@ else:
     print(f"  Exponent (B)  = {B:.4f}")
     print(f"  Prefactor (A) = {A:.4e}")
     print(f"  R²            = {r_value**2:.4f}")
-    print(f"  Points used   = {len(log_x)} (from year {years_log.min():.1f} onward)")#print(f"  Points used   = {len(log_x)} (from year ~1 onward)")
+    print(f"  Points used   = {len(log_x)} (from year {years_log.min():.1f} onward)")
 
-    # ── Create figure ─────────────────────────────────────────────
-    plt.figure(figsize=(12, 7.5))
-
-    # Historical data
-    plt.scatter(years_log, y_log, color='darkred', alpha=0.85, s=60,
-                edgecolor='none', label='Historical Data')
-
-    # Projection
+    # Shared projection data
     years_plot = np.linspace(1.0, 38.0, 800)
     y_plot = A * years_plot ** B
+
+    # ── Compute prediction intervals once (for third plot) ────────
+    
+    # ── Proper prediction intervals (68% and 95%) ───────────────────────────────
+    n = len(log_x)
+    mean_log_x = np.mean(log_x)
+    ss_xx = np.sum((log_x - mean_log_x)**2)
+
+    # Residual variance (MSE = SSE / (n-2))
+    y_pred_train = intercept + slope * log_x
+    residuals = log_y - y_pred_train
+    sse = np.sum(residuals ** 2)
+    df_resid = n - 2
+    mse = sse / df_resid                       # key: this captures the actual scatter
+
+    print(f"Residual standard deviation (log space): {np.sqrt(mse):.4f}")
+
+    t_68 = t.ppf(0.84, df=df_resid)            # ~1σ
+    t_95 = t.ppf(0.975, df=df_resid)           # ~2σ
+
+    log_x_plot = np.log10(years_plot)
+    log_y_pred = intercept + slope * log_x_plot
+
+    # Full prediction standard error (includes residual variance!)
+    var_pred = mse * (1 + 1/n + (log_x_plot - mean_log_x)**2 / ss_xx)
+    se_pred = np.sqrt(var_pred)
+
+    # Bands in log space
+    log_y_68_lower = log_y_pred - t_68 * se_pred
+    log_y_68_upper = log_y_pred + t_68 * se_pred
+    log_y_95_lower = log_y_pred - t_95 * se_pred
+    log_y_95_upper = log_y_pred + t_95 * se_pred
+
+    # Back to price scale
+    y_68_lower = 10 ** log_y_68_lower
+    y_68_upper = 10 ** log_y_68_upper
+    y_95_lower = 10 ** log_y_95_lower
+    y_95_upper = 10 ** log_y_95_upper
+    # ── Plot 2: Main fit plot (no shading) ────────────────────────
+    plt.figure(figsize=(12, 7.5))
+    plt.xscale('log')
+    plt.yscale('log')
+
+    plt.scatter(years_log, y_log, color='darkred', alpha=0.85, s=60,
+                edgecolor='none', label='Historical Data')
 
     plt.plot(years_plot, y_plot, color='royalblue', lw=2.4,
              label=f'Fit + projection: y ≈ {A:.2e} × t^{B:.3f}  (R² = {r_value**2:.3f})')
 
-    plt.xscale('log')
-    plt.yscale('log')
+    # Y-axis formatting (currency)
+    exponents = np.arange(-2, 10)
+    major_positions = 10.0 ** exponents
+    plt.gca().yaxis.set_major_locator(FixedLocator(major_positions))
+    plt.gca().yaxis.set_major_formatter(StrMethodFormatter('${x:,.0f}'))
 
-    
-    
-    
-    
-    
-    
-    
-    from matplotlib.ticker import NullFormatter
-    plt.gca().xaxis.set_minor_formatter(NullFormatter())
+    # Minor y ticks for grid
+    minor_positions = []
+    for exp in exponents:
+        for sub in range(2, 10):
+            minor_positions.append(sub * (10.0 ** exp))
+    plt.gca().yaxis.set_minor_locator(FixedLocator(minor_positions))
 
-    # Option B: Also force major formatter to only show your explicit ticks
-    plt.gca().xaxis.set_major_formatter(plt.ScalarFormatter(useOffset=False))
-    plt.gca().xaxis.set_major_formatter(plt.FuncFormatter(lambda x, pos: f'{x:g}' if x in x_tick_values else ''))
+    # Grids
+    plt.grid(which='major', axis='both', color='gray', linestyle='-', linewidth=0.9, alpha=0.65)
+    plt.grid(which='minor', axis='both', color='lightgray', linestyle='--', linewidth=0.5, alpha=0.45)
 
-    # Your custom major ticks (these will show normally)
+    # X-axis formatting
     x_tick_values = [1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35]
-    plt.xticks(x_tick_values, [str(int(y)) for y in x_tick_values])
+    calendar_labels = [f"{2009 + int(y)}" for y in x_tick_values]
+    combined_labels = [f"{ys}\n{cal}" for ys, cal in zip([str(int(y)) for y in x_tick_values], calendar_labels)]
+    plt.xticks(x_tick_values, combined_labels)
+    for label in plt.gca().get_xticklabels():
+        label.set_fontsize(10)
 
-    # ── Minor locator for grid lines only (no labels) ─────────────────────────────
+    # Minor x grid every integer year
     min_year = 1
     max_year = 38
     every_year = np.arange(min_year, max_year + 1)
     plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
 
-    # Minor grid: vertical lines every year (no labels attached)
-    plt.grid(which='minor', axis='x',
-             color='lightgray', linestyle=':', linewidth=0.6, alpha=0.4)
+    # Limits
+    plt.ylim(0.01, 1e8)
 
-    # Major grid
-    plt.grid(which='major', axis='x',
-             color='gray', linestyle='-', linewidth=0.9, alpha=0.55)
-    
-    
-        # Nuclear option: remove ALL automatic minor tick labels
-    plt.gca().xaxis.set_minor_formatter(NullFormatter())
-    plt.gca().xaxis.set_minor_locator(plt.NullLocator())   # ← this removes minor ticks entirely
-    # Then re-add the locator ONLY for grid (without labels)
-    plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+    # Labels & legend
     plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
     plt.ylabel('Average Price (USD)')
     plt.title('Bitcoin Monthly Average Price – Log-Log + Power-Law Fit & ~20-Year Projection')
 
-    # ── EXPLICIT Y-AXIS TICKS & GRID ────────────────────────────────────────────
-    # Define exponents covering typical BTC price range
-    exponents = np.arange(-2, 10)  # 0.01 to 100,000,000
-
-    # Major ticks = every power of 10
-    major_positions = 10.0 ** exponents  # use 10.0 to force float exponentiation
-    plt.gca().yaxis.set_major_locator(FixedLocator(major_positions))
-
-    # Formatter: plain numbers, no scientific notation, no offset
-    fmt = ScalarFormatter(useOffset=False)
-    fmt.set_scientific(False)
-    plt.gca().yaxis.set_major_formatter(fmt)
-
-    # Minor ticks = 2× to 9× each decade
-    minor_positions = []
-    for exp in exponents:
-        for sub in range(2, 10):
-            minor_positions.append(sub * (10.0 ** exp))  # FIXED: 10.0 ** exp
-
-    plt.gca().yaxis.set_minor_locator(FixedLocator(minor_positions))
-
-    
-    
-    
-    
-    
-    
-    
-    
-    
-#####    
-    from matplotlib.ticker import StrMethodFormatter
-
-    plt.gca().yaxis.set_major_formatter(StrMethodFormatter('${x:,.0f}'))   
-#####  
-    
-    
-    
-    
-    # ── Grid lines ──────────────────────────────────────────────────────────────
-    # Major grid: solid at every power of 10
-    plt.grid(which='major', axis='y',
-             color='gray', linestyle='-', linewidth=1.0, alpha=0.65)
-
-    # Minor grid: dashed, faint at 2×–9×
-    plt.grid(which='minor', axis='y',
-             color='lightgray', linestyle='--', linewidth=0.5, alpha=0.45)
-
-    # Keep x-grid subtle
-    plt.grid(which='major', axis='x', color='gray', linestyle='-', linewidth=0.7, alpha=0.5)
-    plt.grid(which='minor', axis='x', color='lightgray', linestyle='--', linewidth=0.5, alpha=0.45)
-    
-
-    
-    ##
-    min_year = 1
-    max_year = 38   # ~2047
-    every_year = np.arange(min_year, max_year + 1, 1)   # 1,2,3,...,38
-
-# Convert integer years to log scale positions
-    x_every_year_log = every_year   # already in the same unit as years_log
-
-# ── Use these positions for MINOR grid lines (vertical lines every year)
-    plt.gca().xaxis.set_minor_locator(FixedLocator(x_every_year_log))
-
-# Draw the minor grid lines (dashed vertical lines at each integer year)
-    plt.grid(which='minor', axis='x',
-         color='lightgray', linestyle=':', linewidth=0.6, alpha=0.4)
-
-# Optional: make major grid lines a bit stronger if ne
-
-    # Reasonable y-limits to show many decades
-    plt.ylim(0.01, 1e8)   # increase to 1e9 or 1e10 if projection goes higher
-
-    # ── X-axis: starts at 1, log ticks ────────────────────────────
-    x_tick_values = [1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35]
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-        
-    
-    
-    
-    
-        
-    plt.xticks(x_tick_values, [str(int(y)) for y in x_tick_values])
-
-    # Today marker
     today_years = (pd.to_datetime('today') - genesis).days / 365.25
     plt.axvline(today_years, color='gray', ls=':', lw=1.3, alpha=0.65,
                 label=f'Today (~{today_years:.1f} years since 2009)')
 
-    plt.legend(loc='upper left', fontsize=10.5)
+    plt.legend(loc='upper left', fontsize=9.5, framealpha=0.95)
     plt.tight_layout(pad=1.5)
-    
-    
-# ── Dual labels on bottom x-axis ──────────────────────────────────────────────
-# Get current tick locations and "years since" labels
-current_xticks = x_tick_values
-years_since_labels = [str(int(y)) for y in current_xticks]
+    plt.show()
 
-# Corresponding calendar years
-calendar_labels = [f"{2009 + int(y)}" for y in current_xticks]
+    # ── Plot 3: Same fit but WITH shading ─────────────────────────
+    plt.figure(figsize=(12, 7.5))
+ #   plt.gca().set_facecolor('#0e1a38')
+    plt.xscale('log')
+    plt.yscale('log')
 
-# Create combined labels (two lines per tick)
-combined_labels = [f"{ys}\n{cal}" for ys, cal in zip(years_since_labels, calendar_labels)]
 
-# Apply the two-line labels
-plt.xticks(current_xticks, combined_labels)
+ 
+###############fill
+    # Fit line on top
+    
 
-# Optional: make the "years since" smaller or italic to distinguish
-for label in plt.gca().get_xticklabels():
-    label.set_fontsize(10)  # slightly smaller overall
-    # or more advanced: make top line smaller via manual Text objects (harder)
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+    # Reuse same axis formatting as plot 2
+    plt.gca().yaxis.set_major_locator(FixedLocator(major_positions))
+    plt.gca().yaxis.set_major_formatter(StrMethodFormatter('${x:,.0f}'))
+    plt.gca().yaxis.set_minor_locator(FixedLocator(minor_positions))
+
+    plt.gca().xaxis.set_minor_formatter(NullFormatter())
+    plt.xticks(x_tick_values, combined_labels)
+    for label in plt.gca().get_xticklabels():
+        label.set_fontsize(10)
+    plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
+
+
+    plt.ylim(0.01, 1e8)
+
+    plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
+    plt.ylabel('Average Price (USD)')
+    plt.title('Bitcoin Monthly Average Price – Log-Log + Power-Law Fit & Prediction Intervals')
+
+    ##\|# begin color
+    plt.gca().set_facecolor('#0e1a38')   
+        # Historical data
+    plt.scatter(years_log, y_log, color='#d4a017', alpha=0.9, s=65, edgecolor='none', label='Historical Data')  # gold dots
+
+    # Shading
+    plt.fill_between(years_plot, y_95_lower, y_95_upper, color='#1e3a8a', alpha=0.10, label='95% prediction interval')   # deep navy
+    plt.fill_between(years_plot, y_68_lower, y_68_upper,   color='#1e40af', alpha=0.22, label='68% prediction interval')   # medium blue
+
+    # Fit line
+    plt.plot(years_plot, y_plot, color='#60a5fa', lw=2.8, zorder=10,
+             label=f'Fit + projection: y ≈ {A:.2e} × t^{B:.3f}  (R² = {r_value**2:.3f})')  # bright sky blue
+
+    # Today line
+    plt.axvline(today_years, color='#9ca3af', ls='--', lw=1.4, alpha=0.7,
+                label=f'Today (~{today_years:.1f} years since 2009)')
+
+    # Grid
+    plt.grid(which='major', axis='both', color='#4b5563', linestyle='-', linewidth=0.8, alpha=0.5)
+    plt.grid(which='minor', axis='both', color='#6b7280', linestyle=':', linewidth=0.45, alpha=0.35)
+#end color
+    plt.tight_layout(pad=1.5)
     plt.show()
