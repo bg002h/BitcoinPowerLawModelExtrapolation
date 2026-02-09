@@ -1,13 +1,11 @@
 # Bitcoin Monthly Prices — Linear + Log-Log + Power-Law Fit & 20-Year Projection
-# NOW WITH SEPARATE THIRD PLOT FOR SHADING (68% & 95% prediction intervals)
+# WITH SEPARATE THIRD PLOT FOR SHADING + MIDNIGHT GOLD COLOR SCHEME
 # Juno notebook compatible — February 2026
 
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import linregress, t
-
-
 from matplotlib.ticker import FixedLocator, StrMethodFormatter, NullFormatter
 
 # ── CHANGE THIS TO YOUR ACTUAL FILE PATH ─────────────────────────
@@ -91,43 +89,38 @@ else:
     years_plot = np.linspace(1.0, 38.0, 800)
     y_plot = A * years_plot ** B
 
-    # ── Compute prediction intervals once (for third plot) ────────
-    
     # ── Proper prediction intervals (68% and 95%) ───────────────────────────────
     n = len(log_x)
     mean_log_x = np.mean(log_x)
     ss_xx = np.sum((log_x - mean_log_x)**2)
 
-    # Residual variance (MSE = SSE / (n-2))
     y_pred_train = intercept + slope * log_x
     residuals = log_y - y_pred_train
     sse = np.sum(residuals ** 2)
     df_resid = n - 2
-    mse = sse / df_resid                       # key: this captures the actual scatter
+    mse = sse / df_resid
 
     print(f"Residual standard deviation (log space): {np.sqrt(mse):.4f}")
 
-    t_68 = t.ppf(0.84, df=df_resid)            # ~1σ
-    t_95 = t.ppf(0.975, df=df_resid)           # ~2σ
+    t_68 = t.ppf(0.84, df=df_resid)
+    t_95 = t.ppf(0.975, df=df_resid)
 
     log_x_plot = np.log10(years_plot)
     log_y_pred = intercept + slope * log_x_plot
 
-    # Full prediction standard error (includes residual variance!)
     var_pred = mse * (1 + 1/n + (log_x_plot - mean_log_x)**2 / ss_xx)
     se_pred = np.sqrt(var_pred)
 
-    # Bands in log space
     log_y_68_lower = log_y_pred - t_68 * se_pred
     log_y_68_upper = log_y_pred + t_68 * se_pred
     log_y_95_lower = log_y_pred - t_95 * se_pred
     log_y_95_upper = log_y_pred + t_95 * se_pred
 
-    # Back to price scale
     y_68_lower = 10 ** log_y_68_lower
     y_68_upper = 10 ** log_y_68_upper
     y_95_lower = 10 ** log_y_95_lower
     y_95_upper = 10 ** log_y_95_upper
+
     # ── Plot 2: Main fit plot (no shading) ────────────────────────
     plt.figure(figsize=(12, 7.5))
     plt.xscale('log')
@@ -145,18 +138,15 @@ else:
     plt.gca().yaxis.set_major_locator(FixedLocator(major_positions))
     plt.gca().yaxis.set_major_formatter(StrMethodFormatter('${x:,.0f}'))
 
-    # Minor y ticks for grid
     minor_positions = []
     for exp in exponents:
         for sub in range(2, 10):
             minor_positions.append(sub * (10.0 ** exp))
     plt.gca().yaxis.set_minor_locator(FixedLocator(minor_positions))
 
-    # Grids
     plt.grid(which='major', axis='both', color='gray', linestyle='-', linewidth=0.9, alpha=0.65)
     plt.grid(which='minor', axis='both', color='lightgray', linestyle='--', linewidth=0.5, alpha=0.45)
 
-    # X-axis formatting
     x_tick_values = [1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35]
     calendar_labels = [f"{2009 + int(y)}" for y in x_tick_values]
     combined_labels = [f"{ys}\n{cal}" for ys, cal in zip([str(int(y)) for y in x_tick_values], calendar_labels)]
@@ -164,16 +154,13 @@ else:
     for label in plt.gca().get_xticklabels():
         label.set_fontsize(10)
 
-    # Minor x grid every integer year
     min_year = 1
     max_year = 38
     every_year = np.arange(min_year, max_year + 1)
     plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
 
-    # Limits
     plt.ylim(0.01, 1e8)
 
-    # Labels & legend
     plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
     plt.ylabel('Average Price (USD)')
     plt.title('Bitcoin Monthly Average Price – Log-Log + Power-Law Fit & ~20-Year Projection')
@@ -186,56 +173,84 @@ else:
     plt.tight_layout(pad=1.5)
     plt.show()
 
-    # ── Plot 3: Same fit but WITH shading ─────────────────────────
+    # ── Plot 3: Fit with shading + Midnight Gold scheme ───────────
     plt.figure(figsize=(12, 7.5))
- #   plt.gca().set_facecolor('#0e1a38')
+
+    # ── Midnight Gold color scheme ────────────────────────────────
+    plt.gca().set_facecolor('#0a0e17')          # deep midnight navy-black
+
+    # Grids
+    plt.grid(which='major', axis='both', color='#334155', linestyle='-', linewidth=0.9, alpha=0.6)
+    plt.grid(which='minor', axis='both', color='#475569', linestyle=':', linewidth=0.5, alpha=0.35)
+
     plt.xscale('log')
     plt.yscale('log')
 
+    # Historical data (gold)
+    plt.scatter(years_log, y_log, color='#fbbf24', alpha=0.92, s=70, edgecolor='none', label='Historical Data')
 
- 
-###############fill
-    # Fit line on top
-    
+    # Shading (deep-to-medium blue)
+    plt.fill_between(years_plot, y_95_lower, y_95_upper,
+                     color='#1e40af', alpha=0.10, edgecolor='none',
+                     label='95% prediction interval')
 
-    # Reuse same axis formatting as plot 2
+    plt.fill_between(years_plot, y_68_lower, y_68_upper,
+                     color='#3b82f6', alpha=0.22, edgecolor='none',
+                     label='68% prediction interval')
+
+    # Fit line (bright sky blue)
+    plt.plot(years_plot, y_plot, color='#93c5fd', lw=3.0, zorder=10,
+             label=f'Fit + projection: y ≈ {A:.2e} × t^{B:.3f}  (R² = {r_value**2:.3f})')
+
+    # Today marker (light slate)
+    plt.axvline(today_years, color='#cbd5e1', ls='--', lw=1.5, alpha=0.75,
+                label=f'Today (~{today_years:.1f} years since 2009)')
+
+    # Axis text/tick colors (light gray / near-white)
+    plt.gca().tick_params(axis='both', colors='#cbd5e1', labelsize=9.5)
+    plt.gca().xaxis.label.set_color('#e2e8f0')
+    plt.gca().yaxis.label.set_color('#e2e8f0')
+    plt.gca().title.set_color('#f1f5f9')
+
+    # Legend styling
+    legend = plt.legend(loc='upper left', fontsize=9.5, framealpha=0.92)
+    legend.get_frame().set_facecolor('#1e293b')           # dark slate frame
+    for text in legend.get_texts():
+        text.set_color('#e2e8f0')
+
+    # ── Axis formatting (same as plot 2) ──────────────────────────
+    exponents = np.arange(-2, 10)
+    major_positions = 10.0 ** exponents
     plt.gca().yaxis.set_major_locator(FixedLocator(major_positions))
     plt.gca().yaxis.set_major_formatter(StrMethodFormatter('${x:,.0f}'))
+
+    minor_positions = []
+    for exp in exponents:
+        for sub in range(2, 10):
+            minor_positions.append(sub * (10.0 ** exp))
     plt.gca().yaxis.set_minor_locator(FixedLocator(minor_positions))
 
     plt.gca().xaxis.set_minor_formatter(NullFormatter())
+
+    x_tick_values = [1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35]
+    calendar_labels = [f"{2009 + int(y)}" for y in x_tick_values]
+    combined_labels = [f"{ys}\n{cal}" for ys, cal in zip([str(int(y)) for y in x_tick_values], calendar_labels)]
     plt.xticks(x_tick_values, combined_labels)
     for label in plt.gca().get_xticklabels():
         label.set_fontsize(10)
+
+    min_year = 1
+    max_year = 38
+    every_year = np.arange(min_year, max_year + 1)
     plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
 
-
+    # Limits
     plt.ylim(0.01, 1e8)
 
     plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
     plt.ylabel('Average Price (USD)')
     plt.title('Bitcoin Monthly Average Price – Log-Log + Power-Law Fit & Prediction Intervals')
 
-    ##\|# begin color
-    plt.gca().set_facecolor('#0e1a38')   
-        # Historical data
-    plt.scatter(years_log, y_log, color='#d4a017', alpha=0.9, s=65, edgecolor='none', label='Historical Data')  # gold dots
-
-    # Shading
-    plt.fill_between(years_plot, y_95_lower, y_95_upper, color='#1e3a8a', alpha=0.10, label='95% prediction interval')   # deep navy
-    plt.fill_between(years_plot, y_68_lower, y_68_upper,   color='#1e40af', alpha=0.22, label='68% prediction interval')   # medium blue
-
-    # Fit line
-    plt.plot(years_plot, y_plot, color='#60a5fa', lw=2.8, zorder=10,
-             label=f'Fit + projection: y ≈ {A:.2e} × t^{B:.3f}  (R² = {r_value**2:.3f})')  # bright sky blue
-
-    # Today line
-    plt.axvline(today_years, color='#9ca3af', ls='--', lw=1.4, alpha=0.7,
-                label=f'Today (~{today_years:.1f} years since 2009)')
-
-    # Grid
-    plt.grid(which='major', axis='both', color='#4b5563', linestyle='-', linewidth=0.8, alpha=0.5)
-    plt.grid(which='minor', axis='both', color='#6b7280', linestyle=':', linewidth=0.45, alpha=0.35)
-#end color
     plt.tight_layout(pad=1.5)
     plt.show()
+#end plot 3
