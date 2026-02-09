@@ -249,8 +249,13 @@ else:
 
     plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
     plt.ylabel('Average Price (USD)')
-    plt.title('Bitcoin Monthly Average Price – Log-Log + Power-Law Fit & Prediction Intervals')
+    plt.title('Bitcoin Monthly Average Price – Log-Log + Power-Law Fit & 68th/95th Percentile Confidence Intervals')
 
     plt.tight_layout(pad=1.5)
+    plt.text(0.98, 0.015, 'Created by bg002h • 2026-02-09 • with hats off to Grok\nData from bitcoinity.org: https://data.bitcoinity.org/markets/price/all/USD?c=e&t=l',
+             transform=plt.gca().transAxes,
+             fontsize=8.5, color='#94a3b8',          # softer silver-gray
+             ha='right', va='bottom', alpha=0.8,
+             style='italic')
     plt.show()
 #end plot 3
