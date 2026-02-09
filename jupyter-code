@@ -9,7 +9,7 @@ from scipy.stats import linregress, t
 from matplotlib.ticker import FixedLocator, StrMethodFormatter, NullFormatter
 
 # ── CHANGE THIS TO YOUR ACTUAL FILE PATH ─────────────────────────
-csv_path = './bitcoin/BitcoinMonthlyPricesD.csv'
+csv_path = './bitcoin/BitcoinPriceDaily.csv'
 
 # ── Load and clean data ───────────────────────────────────────────
 try:
@@ -45,7 +45,7 @@ plt.figure(figsize=(11, 6))
 plt.scatter(x_dates, y_data, color='blue', alpha=0.7, s=50, edgecolor='none')
 plt.xlabel('Date')
 plt.ylabel('Average Price (USD)')
-plt.title('Bitcoin Monthly Average Price – Linear Scale')
+plt.title('Bitcoin Daily Average Price – Linear Scale')
 plt.grid(True, alpha=0.3)
 
 plt.gca().xaxis.set_major_locator(plt.matplotlib.dates.AutoDateLocator(maxticks=12))
@@ -89,7 +89,7 @@ else:
     years_plot = np.linspace(1.0, 38.0, 800)
     y_plot = A * years_plot ** B
 
-    # ── Proper prediction intervals (68% and 95%) ───────────────────────────────
+    # ── Proper Confidence intervals (68% and 95%) ───────────────────────────────
     n = len(log_x)
     mean_log_x = np.mean(log_x)
     ss_xx = np.sum((log_x - mean_log_x)**2)
@@ -163,7 +163,7 @@ else:
 
     plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
     plt.ylabel('Average Price (USD)')
-    plt.title('Bitcoin Monthly Average Price – Log-Log + Power-Law Fit & ~20-Year Projection')
+    plt.title('Bitcoin Daily Average Price – Log-Log + Power-Law Fit & ~20-Year Projection')
 
     today_years = (pd.to_datetime('today') - genesis).days / 365.25
     plt.axvline(today_years, color='gray', ls=':', lw=1.3, alpha=0.65,
@@ -192,11 +192,11 @@ else:
     # Shading (deep-to-medium blue)
     plt.fill_between(years_plot, y_95_lower, y_95_upper,
                      color='#1e40af', alpha=0.10, edgecolor='none',
-                     label='95% prediction interval')
+                     label='95% confidence interval')
 
     plt.fill_between(years_plot, y_68_lower, y_68_upper,
                      color='#3b82f6', alpha=0.22, edgecolor='none',
-                     label='68% prediction interval')
+                     label='68% confidence interval')
 
     # Fit line (bright sky blue)
     plt.plot(years_plot, y_plot, color='#93c5fd', lw=3.0, zorder=10,
@@ -248,11 +248,11 @@ else:
     plt.ylim(0.01, 1e8)
 
     plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
-    plt.ylabel('Average Price (USD)')
-    plt.title('Bitcoin Monthly Average Price – Log-Log + Power-Law Fit & 68th/95th Percentile Confidence Intervals')
+    plt.ylabel('Bitcoin Price (USD)')
+    plt.title('Bitcoin Daily Average Price – Log-Log + Power-Law Fit & 68th/95th Percentile Confidence Intervals')
 
     plt.tight_layout(pad=1.5)
-    plt.text(0.98, 0.015, 'Created by bg002h • 2026-02-09 • with hats off to Grok\nData from bitcoinity.org: https://data.bitcoinity.org/markets/price/all/USD?c=e&t=l',
+    plt.text(0.98, 0.015, 'bg002h • 2026-02-09 \nData from bitcoinity.org: https://data.bitcoinity.org/markets/price/all/USD?c=e&t=l\n DIY@https://github.com/bg002h/BitcoinPowerLawModelExtrapolation',
              transform=plt.gca().transAxes,
              fontsize=8.5, color='#94a3b8',          # softer silver-gray
              ha='right', va='bottom', alpha=0.8,
