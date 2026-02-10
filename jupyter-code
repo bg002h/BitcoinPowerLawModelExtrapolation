@@ -1,6 +1,6 @@
 # Bitcoin Monthly Prices — Linear + Log-Log + Power-Law Fit & 20-Year Projection
 # WITH SEPARATE THIRD PLOT FOR SHADING + MIDNIGHT GOLD COLOR SCHEME
-# Juno notebook compatible — February 2026
+# Juno notebook compatible — February 2026 10
 
 import pandas as pd
 import numpy as np
