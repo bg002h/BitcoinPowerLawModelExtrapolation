@@ -1,0 +1,699 @@
+# Bitcoin Monthly Prices — Linear + Log-Log + Power-Law Fit & 20-Year Projection
+# WITH SEPARATE THIRD PLOT FOR SHADING + MIDNIGHT GOLD COLOR SCHEME
+# Juno notebook compatible — February 2026
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import linregress, t
+from matplotlib.ticker import FixedLocator, StrMethodFormatter, NullFormatter
+
+# ── CHANGE THIS TO YOUR ACTUAL FILE PATH ─────────────────────────
+csv_path = './bitcoin/BitcoinPriceDaily.csv'
+# At the very top, after imports
+pd.set_option('display.max_rows', 10)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_colwidth', None)
+pd.set_option('display.width', None)
+
+# ── Load and clean data ───────────────────────────────────────────
+try:
+    df = pd.read_csv(csv_path)
+    print("CSV loaded successfully!")
+    print("\nFirst 5 rows:\n", df.head())
+    print("\nColumns:", list(df.columns))
+    print("Shape:", df.shape)
+except FileNotFoundError:
+    print(f"File not found: {csv_path}")
+    print("Tip: Use !pwd or check Files → Juno folder")
+except Exception as e:
+    print("Error loading CSV:", str(e))
+
+date_column  = 'Date'
+value_column = 'Price'
+
+df[date_column] = pd.to_datetime(df[date_column], format='%m/%d/%y', errors='coerce')
+df = df.dropna(subset=[date_column])
+df = df.sort_values(date_column)
+
+x_dates = df[date_column]
+y_data  = df[value_column].astype(float)
+
+# Summary
+print("\nDate range:", x_dates.min().strftime('%Y-%m'),
+      "to", x_dates.max().strftime('%Y-%m'))
+print("Valid points:", len(y_data))
+print(f"Price range: ${y_data.min():,.2f} – ${y_data.max():,.2f}")
+
+# ── Plot 1: Linear scale ──────────────────────────────────────────
+plt.figure(figsize=(11, 6))
+plt.scatter(x_dates, y_data, color='blue', alpha=0.7, s=50, edgecolor='none')
+plt.xlabel('Date')
+plt.ylabel('Average Price (USD)')
+plt.title('Bitcoin Daily Average Price – Linear Scale')
+plt.grid(True, alpha=0.3)
+plt.gca().xaxis.set_major_locator(plt.matplotlib.dates.AutoDateLocator(maxticks=12))
+plt.gca().xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%b %Y'))
+plt.xticks(rotation=45, ha='right')
+plt.tight_layout()
+plt.show()
+
+# ── Prepare data for log-log plots ────────────────────────────────
+valid = y_data > 0
+y_valid = y_data[valid]
+x_dates_valid = x_dates[valid]
+
+genesis = pd.to_datetime('2009-01-9')
+years_since = (x_dates_valid - genesis).dt.days / 365.25
+years_valid = years_since.astype(float)
+
+MIN_YEARS = 1.0
+reasonable = years_valid >= MIN_YEARS
+years_log = years_valid[reasonable]
+y_log     = y_valid[reasonable]
+
+# ── Compute fit once (shared by both plots) ───────────────────────
+if len(y_log) < 10:
+    print("Not enough positive data points for fitting (after year 1 filter).")
+else:
+    log_x = np.log10(years_log)
+    log_y = np.log10(y_log)
+
+    slope, intercept, r_value, pvalue, std_err = linregress(log_x, log_y)
+    B = slope
+    A = 10 ** intercept
+
+    print("\nPower-law fit:  y ≈ A × (years since 2009)^B")
+    print(f"  Exponent (B)  = {B:.4f}")
+    print(f"  Prefactor (A) = {A:.4e}")
+    print(f"  R²            = {r_value**2:.4f}")
+    print(f"  Points used   = {len(log_x)} (from year {years_log.min():.1f} onward)")
+
+    # Shared projection data
+    years_plot = np.linspace(1.0, 38.0, 800)
+    y_plot = A * years_plot ** B
+
+    # ── Proper Confidence intervals (68% and 95%) ───────────────────────────────
+    n = len(log_x)
+    mean_log_x = np.mean(log_x)
+    ss_xx = np.sum((log_x - mean_log_x)**2)
+
+    y_pred_train = intercept + slope * log_x
+    residuals = log_y - y_pred_train
+    sse = np.sum(residuals ** 2)
+    df_resid = n - 2
+    mse = sse / df_resid
+
+    print(f"Residual standard deviation (log space): {np.sqrt(mse):.4f}")
+
+    t_68 = t.ppf(0.84, df=df_resid)
+    t_95 = t.ppf(0.975, df=df_resid)
+
+    log_x_plot = np.log10(years_plot)
+    log_y_pred = intercept + slope * log_x_plot
+
+    var_pred = mse * (1 + 1/n + (log_x_plot - mean_log_x)**2 / ss_xx)
+    se_pred = np.sqrt(var_pred)
+
+    log_y_68_lower = log_y_pred - t_68 * se_pred
+    log_y_68_upper = log_y_pred + t_68 * se_pred
+    log_y_95_lower = log_y_pred - t_95 * se_pred
+    log_y_95_upper = log_y_pred + t_95 * se_pred
+
+    y_68_lower = 10 ** log_y_68_lower
+    y_68_upper = 10 ** log_y_68_upper
+    y_95_lower = 10 ** log_y_95_lower
+    y_95_upper = 10 ** log_y_95_upper
+
+    # ── Plot 2: Main fit plot (no shading) ────────────────────────
+    plt.figure(figsize=(12, 7.5))
+    plt.xscale('log')
+    plt.yscale('log')
+
+    plt.scatter(years_log, y_log, color='darkred', alpha=0.85, s=60,
+                edgecolor='none', label='Historical Data')
+    plt.plot(years_plot, y_plot, color='royalblue', lw=2.4,
+             label=f'Fit + projection: y ≈ {A:.2e} × t^{B:.3f}  (R² = {r_value**2:.3f})')
+
+    # Y-axis formatting (currency)
+    exponents = np.arange(-2, 10)
+    major_positions = 10.0 ** exponents
+    plt.gca().yaxis.set_major_locator(FixedLocator(major_positions))
+    plt.gca().yaxis.set_major_formatter(StrMethodFormatter('${x:,.0f}'))
+
+    minor_positions = []
+    for exp in exponents:
+        for sub in range(2, 10):
+            minor_positions.append(sub * (10.0 ** exp))
+    plt.gca().yaxis.set_minor_locator(FixedLocator(minor_positions))
+
+    plt.grid(which='major', axis='both', color='gray', linestyle='-', linewidth=0.9, alpha=0.65)
+    plt.grid(which='minor', axis='both', color='lightgray', linestyle='--', linewidth=0.5, alpha=0.45)
+
+    x_tick_values = [1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35]
+    calendar_labels = [f"{2009 + int(y)}" for y in x_tick_values]
+    combined_labels = [f"{ys}\n{cal}" for ys, cal in zip([str(int(y)) for y in x_tick_values], calendar_labels)]
+    plt.xticks(x_tick_values, combined_labels)
+    for label in plt.gca().get_xticklabels():
+        label.set_fontsize(10)
+
+    min_year = 1
+    max_year = 38
+    every_year = np.arange(min_year, max_year + 1)
+    plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
+    plt.ylim(0.01, 1e8)
+
+    plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
+    plt.ylabel('Average Price (USD)')
+    plt.title('Bitcoin Daily Average Price – Log-Log + Power-Law Fit & ~20-Year Projection')
+
+    today_years = (pd.to_datetime('today') - genesis).days / 365.25
+    plt.axvline(today_years, color='gray', ls=':', lw=1.3, alpha=0.65,
+                label=f'Today (~{today_years:.1f} years since 2009)')
+
+    plt.legend(loc='upper left', fontsize=9.5, framealpha=0.95)
+    plt.tight_layout(pad=1.5)
+    plt.show()
+
+    # ── Plot 3: Fit with shading + Midnight Gold scheme ───────────
+    plt.figure(figsize=(12, 7.5))
+    # ── Midnight Gold color scheme ────────────────────────────────
+    plt.gca().set_facecolor('white')
+    #plt.gca().set_facecolor('#0a0e17')          # deep midnight navy-black
+
+    # Grids
+    plt.grid(which='major', axis='both', color='#334155', linestyle='-', linewidth=0.9, alpha=0.6)
+    plt.grid(which='minor', axis='both', color='#475569', linestyle=':', linewidth=0.5, alpha=0.35)
+
+    plt.xscale('log')
+    plt.yscale('log')
+
+    # Historical data (gold)
+    plt.scatter(years_log, y_log, color='#fbbf24', alpha=0.92, s=1, edgecolor='none', label='Historical Data')
+
+    # Shading (deep-to-medium blue)
+    plt.fill_between(years_plot, y_95_lower, y_95_upper,
+                     color='#1e40af', alpha=0.10, edgecolor='none',
+                     label='95% confidence interval')
+    plt.fill_between(years_plot, y_68_lower, y_68_upper,
+                     color='#3b82f6', alpha=0.22, edgecolor='none',
+                     label='68% confidence interval')
+
+    # Fit line (bright sky blue)
+    plt.plot(years_plot, y_plot, color='#93c5fd', lw=1.0, zorder=10,
+             label=f'Fit + projection: y ≈ {A:.2e} × t^{B:.3f}  (R² = {r_value**2:.3f})')
+
+    # Today marker (light slate)
+    plt.axvline(today_years, color='#cbd5e1', ls='--', lw=1.5, alpha=0.75,
+                label=f'Today (~{today_years:.1f} years since 2009)')
+
+    # Axis text/tick colors (light gray / near-white)
+    plt.gca().tick_params(axis='both', colors='#cbd5e1', labelsize=9.5)
+    plt.gca().xaxis.label.set_color('#e2e8f0')
+    plt.gca().yaxis.label.set_color('#e2e8f0')
+    plt.gca().title.set_color('#f1f5f9')
+
+    # Legend styling
+    legend = plt.legend(loc='upper left', fontsize=9.5, framealpha=0.92)
+    legend.get_frame().set_facecolor('#1e293b')           # dark slate frame
+    for text in legend.get_texts():
+        text.set_color('#e2e8f0')
+
+    # ── Axis formatting (same as plot 2) ──────────────────────────
+    exponents = np.arange(-2, 10)
+    major_positions = 10.0 ** exponents
+    plt.gca().yaxis.set_major_locator(FixedLocator(major_positions))
+    plt.gca().yaxis.set_major_formatter(StrMethodFormatter('${x:,.0f}'))
+
+    minor_positions = []
+    for exp in exponents:
+        for sub in range(2, 10):
+            minor_positions.append(sub * (10.0 ** exp))
+    plt.gca().yaxis.set_minor_locator(FixedLocator(minor_positions))
+    plt.gca().xaxis.set_minor_formatter(NullFormatter())
+
+    x_tick_values = [1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35]
+    calendar_labels = [f"{2009 + int(y)}" for y in x_tick_values]
+    combined_labels = [f"{ys}\n{cal}" for ys, cal in zip([str(int(y)) for y in x_tick_values], calendar_labels)]
+    plt.xticks(x_tick_values, combined_labels)
+    for label in plt.gca().get_xticklabels():
+        label.set_fontsize(10)
+
+    min_year = 1
+    max_year = 38
+    every_year = np.arange(min_year, max_year + 1)
+    plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
+    plt.ylim(0.01, 1e8)
+
+    plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
+    plt.ylabel('Bitcoin Price (USD)')
+    plt.title('Bitcoin Daily Average Price – Log-Log + Power-Law Fit & 68th/95th Percentile Confidence Intervals')
+
+    plt.tight_layout(pad=1.5)
+    plt.text(0.98, 0.015, 'bg002h • 2026-02-09 \nData from bitcoinity.org: https://data.bitcoinity.org/markets/price/all/USD?c=e&t=l\n DIY@https://github.com/bg002h/BitcoinPowerLawModelExtrapolation',
+             transform=plt.gca().transAxes,
+             fontsize=8.5, color='#94a3b8',          # softer silver-gray
+             ha='right', va='bottom', alpha=0.8,
+             style='italic')
+    plt.show()
+
+# ── Plot 4: Zoomed Fit with shading + Midnight Gold scheme ──────────────────────
+plt.figure(figsize=(12, 7.5))
+# ── Midnight Gold color scheme ────────────────────────────────────────────────
+plt.gca().set_facecolor('white')
+# plt.gca().set_facecolor('#0a0e17')  # ← uncomment for dark navy background
+
+# Grids
+plt.grid(which='major', axis='both', color='#334155', linestyle='-', linewidth=0.9, alpha=0.6)
+plt.grid(which='minor', axis='both', color='#475569', linestyle=':', linewidth=0.5, alpha=0.35)
+
+plt.xscale('log')
+plt.yscale('log')
+
+# Historical data (gold)
+plt.scatter(years_log, y_log, color='#fbbf24', alpha=0.92, s=6, edgecolor='none',
+            label='Historical Data')
+
+# Shading (deep-to-medium blue)
+plt.fill_between(years_plot, y_95_lower, y_95_upper,
+                 color='#1e40af', alpha=0.10, edgecolor='none',
+                 label='95% confidence interval')
+plt.fill_between(years_plot, y_68_lower, y_68_upper,
+                 color='#3b82f6', alpha=0.22, edgecolor='none',
+                 label='68% confidence interval')
+
+# Fit line (bright sky blue)
+plt.plot(years_plot, y_plot, color='#93c5fd', lw=1.0, zorder=10,
+         label=f'Fit + projection: y ≈ {A:.2e} × t^{B:.3f}  (R² = {r_value**2:.3f})')
+
+# Today marker (light slate)
+plt.axvline(today_years, color='#cbd5e1', ls='--', lw=0.75, alpha=0.75,
+            label=f'Today (~{today_years:.1f} years since 2009)')
+
+# Axis text/tick colors (light gray / near-white)
+plt.gca().tick_params(axis='both', colors='#cbd5e1', labelsize=9.5)
+plt.gca().xaxis.label.set_color('#e2e8f0')
+plt.gca().yaxis.label.set_color('#e2e8f0')
+plt.gca().title.set_color('#f1f5f9')
+
+# Legend styling
+legend = plt.legend(loc='upper left', fontsize=9.5, framealpha=0.92)
+legend.get_frame().set_facecolor('#1e293b')           # dark slate frame
+for text in legend.get_texts():
+    text.set_color('#e2e8f0')
+
+# ── Axis formatting (same as previous plots) ───────────────────────────────────
+exponents = np.arange(-2, 10)
+major_positions = 10.0 ** exponents
+plt.gca().yaxis.set_major_locator(FixedLocator(major_positions))
+plt.gca().yaxis.set_major_formatter(StrMethodFormatter('${x:,.0f}'))
+
+minor_positions = []
+for exp in exponents:
+    for sub in range(2, 10):
+        minor_positions.append(sub * (10.0 ** exp))
+plt.gca().yaxis.set_minor_locator(FixedLocator(minor_positions))
+plt.gca().xaxis.set_minor_formatter(NullFormatter())
+
+x_tick_values = [1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35]
+calendar_labels = [f"{2009 + int(y)}" for y in x_tick_values]
+combined_labels = [f"{ys}\n{cal}" for ys, cal in zip([str(int(y)) for y in x_tick_values], calendar_labels)]
+plt.xticks(x_tick_values, combined_labels)
+
+for label in plt.gca().get_xticklabels():
+    label.set_fontsize(10)
+
+min_year = 1
+max_year = 38
+every_year = np.arange(min_year, max_year + 1)
+plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
+
+# Zoomed limits
+plt.ylim(2e4, 3e7)
+plt.xlim(15, 35)
+
+# Labels & title
+plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
+plt.ylabel('Bitcoin Price (USD)')
+plt.title('Bitcoin Daily Average Price – Log-Log + Power-Law Fit & 68th/95th Percentile Confidence Intervals')
+
+# Credit / signature (two lines)
+plt.text(0.98, 0.015,
+         'bg002h • 2026-02-09\nData from bitcoinity.org: https://data.bitcoinity.org/markets/price/all/USD?c=e&t=l\nDIY@https://github.com/bg002h/BitcoinPowerLawModelExtrapolation',
+         transform=plt.gca().transAxes,
+         fontsize=8.5, color='#94a3b8',          # softer silver-gray
+         ha='right', va='bottom', alpha=0.8,
+         style='italic')
+
+plt.tight_layout(pad=1.5)
+plt.show()
+
+# ── Plot 5: Point-to-Point Log-Log Slope (local exponent) ───────────────────────
+plt.figure(figsize=(12, 7.5))
+# ── Match x-axis exactly to Plot 3 ────────────────────────────────────────
+# Same major tick positions + dual labels (years since + calendar year)
+x_tick_values = [1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35]
+calendar_labels = [f"{2009 + int(y)}" for y in x_tick_values]
+combined_labels = [f"{ys}\n{cal}" for ys, cal in zip([str(int(y)) for y in x_tick_values], calendar_labels)]
+plt.xticks(x_tick_values, combined_labels)
+for label in plt.gca().get_xticklabels():
+    label.set_fontsize(10)
+
+# Minor x grid lines every integer year (same as Plot 3)
+min_year = 1
+max_year = 38
+every_year = np.arange(min_year, max_year + 1)
+plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
+# Suppress unwanted minor tick labels (prevents floating multipliers)
+plt.gca().xaxis.set_minor_formatter(NullFormatter())
+
+# Match x-grid styling to Plot 3
+plt.grid(which='major', axis='x', color='gray', linestyle='-', linewidth=0.9, alpha=0.55)
+plt.grid(which='minor', axis='x', color='lightgray', linestyle=':', linewidth=0.6, alpha=0.4)
+
+# Set scales
+plt.xscale('log')
+plt.yscale('linear')  # slope is already a rate, no need for log y here
+
+# After plt.xscale('log')
+plt.gca().xaxis.set_major_locator(FixedLocator(x_tick_values))
+plt.gca().xaxis.set_major_formatter(plt.FixedFormatter(combined_labels))
+# Optional: still want minor ticks between them
+plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
+plt.gca().xaxis.set_minor_formatter(NullFormatter())
+
+# Calculate point-to-point slopes
+slopes = []
+mid_years = []
+for i in range(len(years_log) - 1):
+    dy = log_y[i+1] - log_y[i]
+    dx = log_x[i+1] - log_x[i]
+    if dx > 0:  # avoid division by zero (should not happen)
+        slope = dy / dx
+        slopes.append(slope)
+        # Mid-point year for x-position
+        mid_years.append((years_log[i] + years_log[i+1]) / 2)
+
+# Scatter + line of raw point-to-point slopes
+plt.scatter(mid_years, slopes, color='#ef4444', alpha=0.7, s=25, label='Point-to-point slope')
+plt.plot(mid_years, slopes, color='#ef4444', lw=0.8, alpha=0.5)
+
+# Rolling average (50-period ~4 years) to smooth noise
+window = 50
+if len(slopes) >= window:
+    rolling_avg = pd.Series(slopes).rolling(window=window, min_periods=1, center=True).mean()
+    plt.plot(mid_years, rolling_avg, color='#10b981', lw=2.5, label=f'{window}-period rolling avg slope')
+
+# Formatting
+plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
+plt.ylabel('Local log-log slope (instantaneous exponent)')
+plt.title('Point-to-Point Log-Log Slope of Bitcoin Price (Local Exponent Over Time)')
+
+plt.legend(loc='upper left', fontsize=10, framealpha=0.92)
+plt.grid(True, alpha=0.4)
+
+# Limits (adjust as needed)
+plt.xlim(1.49, 17.2)
+plt.ylim(-1200, 1200)  # typical range for BTC log-log slopes; zoom if needed
+
+# Credit (same as your other plots)
+plt.text(0.98, 0.015,
+         'bg002h • 2026-02-09\nData from bitcoinity.org: https://data.bitcoinity.org/markets/price/all/USD?c=e&t=l\nDIY@https://github.com/bg002h/BitcoinPowerLawModelExtrapolation',
+         transform=plt.gca().transAxes,
+         fontsize=8.5, color='#94a3b8',
+         ha='right', va='bottom', alpha=0.8,
+         style='italic')
+
+plt.tight_layout(pad=1.5)
+plt.show()
+
+# After the loop that calculates slopes and mid_years:
+# Convert to numpy array for easier counting
+slopes_array = np.array(slopes)
+
+# Count how many slopes are < -500
+count_negative_extreme = np.sum(slopes_array < -500)
+
+# Total number of slopes calculated
+total_slopes = len(slopes_array)
+
+# Proportion
+proportion = count_negative_extreme / total_slopes if total_slopes > 0 else 0
+
+# Print results
+print(f"Number of point-to-point slopes < -500: {count_negative_extreme}")
+print(f"Total number of slopes calculated:      {total_slopes}")
+print(f"Proportion of extreme negative slopes:  {proportion:.4f}  ({count_negative_extreme / total_slopes * 100:.2f}%)")
+
+# Assume this code is run after the existing calculations in your notebook
+# (after slopes and mid_years are computed in Plot 5 section)
+# Add this if not already defined:
+x_dates_log = x_dates_valid[reasonable]
+# y_log is already the prices (not logged)
+
+# Convert to arrays
+slopes_arr = np.array(slopes)
+mid_years_arr = np.array(mid_years)
+
+# Get indices for top 100 positive (highest slopes) and top 100 negative (lowest slopes)
+pos_indices = np.argsort(slopes_arr)[-100:][::-1]  # descending order
+neg_indices = np.argsort(slopes_arr)[:100]         # ascending order (most negative first after sorting)
+
+# Function to create DataFrame for extremes
+def get_extreme_df(indices, ascending=False):
+    data = []
+    for idx in indices:
+        start_idx = idx
+        start_date = x_dates_log.iloc[start_idx].strftime('%Y-%m-%d')
+        end_date = x_dates_log.iloc[start_idx + 1].strftime('%Y-%m-%d')
+        price_start = y_log.iloc[start_idx]
+        price_end = y_log.iloc[start_idx + 1]
+        pct_change = (price_end - price_start) / price_start * 100
+        slope_val = slopes_arr[idx]
+        mid_year = mid_years_arr[idx]
+        data.append({
+            'Start Date': start_date,
+            'End Date': end_date,
+            'Slope': slope_val,
+            'Price Start': f"${price_start:,.2f}",
+            'Price End': f"${price_end:,.2f}",
+            '% Change': f"{pct_change:.2f}%",
+            'Mid Years': f"{mid_year:.2f}"
+        })
+    df = pd.DataFrame(data)
+    df = df.sort_values('Slope', ascending=ascending)  # False for positive (largest first), True for negative (smallest first)
+    return df
+
+# Create DataFrames
+positive_df = get_extreme_df(pos_indices, ascending=False)
+negative_df = get_extreme_df(neg_indices, ascending=True)
+
+# Display tables
+print("Top 100 Most Positive Daily Slopes")
+display(positive_df)
+
+print("\nTop 100 Most Negative Daily Slopes")
+display(negative_df)
+
+# Chart: Scatter plot highlighting the top 100 positive and negative on the full slope timeline
+plt.figure(figsize=(12, 7.5))
+plt.xscale('log')
+plt.yscale('linear')
+
+# Plot all slopes in background (gray)
+plt.scatter(mid_years_arr, slopes_arr, color='gray', alpha=0.3, s=20, label='All Daily Slopes')
+
+# Highlight top 100 positive (green)
+pos_mid = mid_years_arr[pos_indices]
+pos_slopes = slopes_arr[pos_indices]
+plt.scatter(pos_mid, pos_slopes, color='green', alpha=0.8, s=50, label='Top 100 Positive')
+
+# Highlight top 100 negative (red)
+neg_mid = mid_years_arr[neg_indices]
+neg_slopes = slopes_arr[neg_indices]
+plt.scatter(neg_mid, neg_slopes, color='red', alpha=0.8, s=50, label='Top 100 Negative')
+
+# X-axis formatting (to match Plot 3/5 and fix log scale issues)
+x_tick_values = [1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35]
+calendar_labels = [f"{2009 + int(y)}" for y in x_tick_values]
+combined_labels = [f"{int(y)}\n{cal}" for y, cal in zip(x_tick_values, calendar_labels)]
+
+plt.gca().xaxis.set_major_locator(FixedLocator(x_tick_values))
+plt.gca().set_xticklabels(combined_labels)
+for label in plt.gca().get_xticklabels():
+    label.set_fontsize(10)
+
+min_year = 1
+max_year = 38
+every_year = np.arange(min_year, max_year + 1)
+plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
+plt.gca().xaxis.set_minor_formatter(NullFormatter())
+
+# Grids (matching Plot 5 style)
+plt.grid(which='major', axis='both', color='gray', linestyle='-', linewidth=0.9, alpha=0.55)
+plt.grid(which='minor', axis='both', color='lightgray', linestyle=':', linewidth=0.6, alpha=0.4)
+
+# Labels and limits
+plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
+plt.ylabel('Local log-log slope (instantaneous exponent)')
+plt.title('Highlighted Top 100 Most Positive and Negative Daily Log-Log Slopes')
+plt.legend(loc='upper left')
+plt.xlim(1, 38)
+plt.ylim(np.min(slopes_arr) - 100, np.max(slopes_arr) + 100)  # Auto-adjust based on data, with buffer
+plt.tight_layout()
+plt.show()
+
+# ── LINEAR SPACE: Daily Price Change and Percentage Change Analysis ───────
+print("\n" + "="*80)
+print("LINEAR SPACE ANALYSIS: Daily Changes")
+print("="*80)
+
+# Calculate daily changes (must be on consecutive days)
+daily_price_changes = []
+daily_pct_changes = []
+change_dates = []
+
+for i in range(len(y_log) - 1):
+    # Check if consecutive days (within 2 days to allow for weekends)
+    time_diff = (x_dates_log.iloc[i+1] - x_dates_log.iloc[i]).days
+    if time_diff <= 2:
+        price_change = y_log.iloc[i+1] - y_log.iloc[i]
+        pct_change = (price_change / y_log.iloc[i]) * 100
+        
+        daily_price_changes.append(price_change)
+        daily_pct_changes.append(pct_change)
+        change_dates.append(x_dates_log.iloc[i+1])
+
+# Convert to arrays
+daily_price_changes = np.array(daily_price_changes)
+daily_pct_changes = np.array(daily_pct_changes)
+change_dates = pd.Series(change_dates)
+
+# Get top 100 positive and negative by absolute dollar change
+pos_dollar_indices = np.argsort(daily_price_changes)[-100:][::-1]
+neg_dollar_indices = np.argsort(daily_price_changes)[:100]
+
+# Get top 100 positive and negative by percentage change
+pos_pct_indices = np.argsort(daily_pct_changes)[-100:][::-1]
+neg_pct_indices = np.argsort(daily_pct_changes)[:100]
+
+# Create DataFrames
+def create_change_df(indices, change_type='dollar'):
+    data = []
+    for idx in indices:
+        date = change_dates.iloc[idx].strftime('%Y-%m-%d')
+        price_start = y_log.iloc[idx]
+        price_end = y_log.iloc[idx + 1]
+        dollar_change = daily_price_changes[idx]
+        pct_change = daily_pct_changes[idx]
+        
+        data.append({
+            'Date': date,
+            'Price Start': f"${price_start:,.2f}",
+            'Price End': f"${price_end:,.2f}",
+            'Dollar Change': f"${dollar_change:+,.2f}",
+            '% Change': f"{pct_change:+.2f}%"
+        })
+    return pd.DataFrame(data)
+
+# Top 100 by absolute dollar change
+print("\n📈 Top 100 Largest POSITIVE Dollar Changes")
+pos_dollar_df = create_change_df(pos_dollar_indices)
+display(pos_dollar_df)
+
+print("\n📉 Top 100 Largest NEGATIVE Dollar Changes")
+neg_dollar_df = create_change_df(neg_dollar_indices)
+display(neg_dollar_df)
+
+# Top 100 by percentage change
+print("\n📈 Top 100 Largest POSITIVE Percentage Changes")
+pos_pct_df = create_change_df(pos_pct_indices, 'pct')
+display(pos_pct_df)
+
+print("\n📉 Top 100 Largest NEGATIVE Percentage Changes")
+neg_pct_df = create_change_df(neg_pct_indices, 'pct')
+display(neg_pct_df)
+
+# Summary statistics
+print("\n" + "="*80)
+print("SUMMARY STATISTICS")
+print("="*80)
+print(f"Mean daily change:        ${np.mean(daily_price_changes):+,.2f}")
+print(f"Median daily change:      ${np.median(daily_price_changes):+,.2f}")
+print(f"Std dev daily change:     ${np.std(daily_price_changes):,.2f}")
+print(f"\nMean daily % change:      {np.mean(daily_pct_changes):+.2f}%")
+print(f"Median daily % change:    {np.median(daily_pct_changes):+.2f}%")
+print(f"Std dev daily % change:   {np.std(daily_pct_changes):.2f}%")
+print(f"\nLargest gain (one day):   ${np.max(daily_price_changes):+,.2f} ({np.max(daily_pct_changes):+.2f}%)")
+print(f"Largest loss (one day):   ${np.min(daily_price_changes):+,.2f} ({np.min(daily_pct_changes):+.2f}%)")
+
+# ── PLOT: Daily Changes Over Time ─────────────────────────────────────────
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+
+# Dollar changes
+ax1.scatter(change_dates, daily_price_changes, alpha=0.6, s=15, color='steelblue', edgecolor='none')
+ax1.axhline(0, color='black', linewidth=1, linestyle='-', alpha=0.5)
+ax1.fill_between(change_dates, 0, daily_price_changes, 
+                  where=(daily_price_changes >= 0), color='green', alpha=0.2, interpolate=True)
+ax1.fill_between(change_dates, 0, daily_price_changes, 
+                  where=(daily_price_changes < 0), color='red', alpha=0.2, interpolate=True)
+ax1.set_ylabel('Daily Price Change (USD)')
+ax1.set_title('Bitcoin Daily Price Changes Over Time')
+ax1.grid(True, alpha=0.3)
+ax1.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y'))
+
+# Percentage changes
+ax2.scatter(change_dates, daily_pct_changes, alpha=0.6, s=15, color='steelblue', edgecolor='none')
+ax2.axhline(0, color='black', linewidth=1, linestyle='-', alpha=0.5)
+ax2.fill_between(change_dates, 0, daily_pct_changes, 
+                  where=(daily_pct_changes >= 0), color='green', alpha=0.2, interpolate=True)
+ax2.fill_between(change_dates, 0, daily_pct_changes, 
+                  where=(daily_pct_changes < 0), color='red', alpha=0.2, interpolate=True)
+ax2.set_xlabel('Date')
+ax2.set_ylabel('Daily % Change')
+ax2.set_title('Bitcoin Daily Percentage Changes Over Time')
+ax2.grid(True, alpha=0.3)
+ax2.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y'))
+
+plt.tight_layout()
+plt.show()
+
+# ── PLOT: Distribution of Daily Changes ───────────────────────────────────
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+# Histogram of dollar changes
+ax1.hist(daily_price_changes, bins=100, color='steelblue', alpha=0.7, edgecolor='black')
+ax1.axvline(0, color='red', linewidth=2, linestyle='--', label='Zero change')
+ax1.axvline(np.mean(daily_price_changes), color='orange', linewidth=2, linestyle='--', label=f'Mean: ${np.mean(daily_price_changes):,.0f}')
+ax1.set_xlabel('Daily Price Change (USD)')
+ax1.set_ylabel('Frequency')
+ax1.set_title('Distribution of Daily Price Changes')
+ax1.legend()
+ax1.grid(True, alpha=0.3)
+
+# Histogram of percentage changes
+ax2.hist(daily_pct_changes, bins=100, color='steelblue', alpha=0.7, edgecolor='black')
+ax2.axvline(0, color='red', linewidth=2, linestyle='--', label='Zero change')
+ax2.axvline(np.mean(daily_pct_changes), color='orange', linewidth=2, linestyle='--', label=f'Mean: {np.mean(daily_pct_changes):.1f}%')
+ax2.set_xlabel('Daily % Change')
+ax2.set_ylabel('Frequency')
+ax2.set_title('Distribution of Daily Percentage Changes')
+ax2.legend()
+ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Rolling 30-day volatility
+window = 30
+rolling_std = pd.Series(daily_pct_changes).rolling(window=window).std()
+
+plt.figure(figsize=(12, 6))
+plt.plot(change_dates, rolling_std, color='purple', lw=1.5, label=f'{window}-day rolling volatility')
+plt.xlabel('Date')
+plt.ylabel('Volatility (Std Dev of Daily % Change)')
+plt.title(f'Bitcoin {window}-Day Rolling Volatility')
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.show()
