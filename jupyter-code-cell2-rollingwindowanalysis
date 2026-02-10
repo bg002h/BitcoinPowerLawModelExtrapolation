@@ -1,0 +1,440 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# ROLLING WINDOW ANALYSIS: Multi-Day Price Changes (with Date Filter)
+# ══════════════════════════════════════════════════════════════════════════════
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FixedLocator
+
+# ── CONFIGURATION ─────────────────────────────────────────────────────────────
+# Set the minimum date to include in analysis (None = include all dates)
+MIN_DATE = '2016-01-01'  # Change this to your desired start date, or set to None
+# MIN_DATE = None  # Uncomment to include all dates
+# MIN_DATE = '2020-01-01'  # Example: start from 2020
+
+# Define rolling windows to analyze
+#windows = [3, 7, 14, 30, 60, 90]
+windows = [3]
+
+# ── FILTER DATA BY DATE ───────────────────────────────────────────────────────
+if MIN_DATE is not None:
+    min_date_filter = pd.to_datetime(MIN_DATE)
+    date_mask = x_dates_log >= min_date_filter
+    
+    # Apply filter
+    x_dates_filtered = x_dates_log[date_mask]
+    y_log_filtered = y_log[date_mask]
+    
+    # Reset index for clean indexing
+    x_dates_filtered = x_dates_filtered.reset_index(drop=True)
+    y_log_filtered = y_log_filtered.reset_index(drop=True)
+    
+    print("="*80)
+    print(f"DATE FILTER APPLIED: Only analyzing data from {MIN_DATE} onward")
+    print("="*80)
+    print(f"Original data points: {len(x_dates_log)}")
+    print(f"Filtered data points: {len(x_dates_filtered)}")
+    print(f"Date range: {x_dates_filtered.min().strftime('%Y-%m-%d')} to {x_dates_filtered.max().strftime('%Y-%m-%d')}")
+    print("="*80 + "\n")
+else:
+    # Use all data
+    x_dates_filtered = x_dates_log.reset_index(drop=True)
+    y_log_filtered = y_log.reset_index(drop=True)
+    
+    print("="*80)
+    print("NO DATE FILTER: Analyzing all available data")
+    print("="*80)
+    print(f"Total data points: {len(x_dates_filtered)}")
+    print(f"Date range: {x_dates_filtered.min().strftime('%Y-%m-%d')} to {x_dates_filtered.max().strftime('%Y-%m-%d')}")
+    print("="*80 + "\n")
+
+# Dictionary to store results for each window
+rolling_results = {}
+
+print("="*80)
+print("CALCULATING ROLLING WINDOW CHANGES...")
+print("="*80)
+
+for window in windows:
+    print(f"\nProcessing {window}-day window...")
+    
+    # Check if we have enough data for this window
+    if len(y_log_filtered) < window + 1:
+        print(f"  ⚠️  WARNING: Not enough data points ({len(y_log_filtered)}) for {window}-day window. Skipping.")
+        continue
+    
+    # Lists to store changes for this window
+    window_dollar_changes = []
+    window_pct_changes = []
+    window_end_dates = []
+    window_start_dates = []
+    window_start_prices = []
+    window_end_prices = []
+    
+    # Calculate rolling changes
+    for i in range(len(y_log_filtered) - window):
+        # Get start and end of window
+        start_idx = i
+        end_idx = i + window
+        
+        # Actual dates
+        start_date = x_dates_filtered.iloc[start_idx]
+        end_date = x_dates_filtered.iloc[end_idx]
+        
+        # Prices
+        start_price = y_log_filtered.iloc[start_idx]
+        end_price = y_log_filtered.iloc[end_idx]
+        
+        # Changes
+        dollar_change = end_price - start_price
+        pct_change = (dollar_change / start_price) * 100
+        
+        # Store
+        window_dollar_changes.append(dollar_change)
+        window_pct_changes.append(pct_change)
+        window_end_dates.append(end_date)
+        window_start_dates.append(start_date)
+        window_start_prices.append(start_price)
+        window_end_prices.append(end_price)
+    
+    # Convert to arrays
+    window_dollar_changes = np.array(window_dollar_changes)
+    window_pct_changes = np.array(window_pct_changes)
+    
+    # Store results
+    rolling_results[window] = {
+        'dollar_changes': window_dollar_changes,
+        'pct_changes': window_pct_changes,
+        'end_dates': window_end_dates,
+        'start_dates': window_start_dates,
+        'start_prices': window_start_prices,
+        'end_prices': window_end_prices
+    }
+    
+    print(f"  ✓ Calculated {len(window_dollar_changes)} {window}-day windows")
+
+# Filter out windows that didn't have enough data
+windows = [w for w in windows if w in rolling_results]
+
+if len(windows) == 0:
+    print("\n⚠️  ERROR: No windows have enough data. Try a later MIN_DATE or shorter windows.")
+else:
+    print(f"\n✓ All rolling window calculations complete for {len(windows)} windows!\n")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DISPLAY TOP 100 FOR EACH WINDOW
+# ══════════════════════════════════════════════════════════════════════════════
+
+def create_rolling_window_df(window, indices, change_type='dollar'):
+    """Create DataFrame for top/bottom 100 changes in a rolling window"""
+    data = rolling_results[window]
+    
+    rows = []
+    for idx in indices:
+        start_date = data['start_dates'][idx]
+        end_date = data['end_dates'][idx]
+        start_price = data['start_prices'][idx]
+        end_price = data['end_prices'][idx]
+        dollar_change = data['dollar_changes'][idx]
+        pct_change = data['pct_changes'][idx]
+        
+        rows.append({
+            'Start Date': start_date.strftime('%Y-%m-%d'),
+            'End Date': end_date.strftime('%Y-%m-%d'),
+            'Days': window,
+            'Start Price': f"${start_price:,.2f}",
+            'End Price': f"${end_price:,.2f}",
+            'Dollar Change': f"${dollar_change:+,.2f}",
+            '% Change': f"{pct_change:+.2f}%"
+        })
+    
+    return pd.DataFrame(rows)
+
+# Display tables for each window
+for window in windows:
+    print("="*80)
+    print(f"{window}-DAY ROLLING WINDOW ANALYSIS")
+    if MIN_DATE is not None:
+        print(f"(Data from {MIN_DATE} onward)")
+    print("="*80)
+    
+    data = rolling_results[window]
+    dollar_changes = data['dollar_changes']
+    pct_changes = data['pct_changes']
+    
+    # Determine how many to show (top 100 or fewer if not enough data)
+    n_show = min(100, len(dollar_changes))
+    
+    # Get top N indices
+    pos_dollar_idx = np.argsort(dollar_changes)[-n_show:][::-1]
+    neg_dollar_idx = np.argsort(dollar_changes)[:n_show]
+    pos_pct_idx = np.argsort(pct_changes)[-n_show:][::-1]
+    neg_pct_idx = np.argsort(pct_changes)[:n_show]
+    
+    # Summary stats
+    print(f"\n📊 Summary Statistics ({window}-day windows, n={len(dollar_changes)}):")
+    print(f"  Mean change:        ${np.mean(dollar_changes):+,.2f} ({np.mean(pct_changes):+.2f}%)")
+    print(f"  Median change:      ${np.median(dollar_changes):+,.2f} ({np.median(pct_changes):+.2f}%)")
+    print(f"  Std dev:            ${np.std(dollar_changes):,.2f} ({np.std(pct_changes):.2f}%)")
+    print(f"  Max gain:           ${np.max(dollar_changes):+,.2f} ({np.max(pct_changes):+.2f}%)")
+    print(f"  Max loss:           ${np.min(dollar_changes):+,.2f} ({np.min(pct_changes):+.2f}%)")
+    
+    # Top N by dollar change
+    print(f"\n📈 Top {n_show} Largest POSITIVE Dollar Changes ({window}-day)")
+    pos_dollar_df = create_rolling_window_df(window, pos_dollar_idx)
+    display(pos_dollar_df)
+    
+    print(f"\n📉 Top {n_show} Largest NEGATIVE Dollar Changes ({window}-day)")
+    neg_dollar_df = create_rolling_window_df(window, neg_dollar_idx)
+    display(neg_dollar_df)
+    
+    # Top N by percentage change
+    print(f"\n📈 Top {n_show} Largest POSITIVE Percentage Changes ({window}-day)")
+    pos_pct_df = create_rolling_window_df(window, pos_pct_idx, 'pct')
+    display(pos_pct_df)
+    
+    print(f"\n📉 Top {n_show} Largest NEGATIVE Percentage Changes ({window}-day)")
+    neg_pct_df = create_rolling_window_df(window, neg_pct_idx, 'pct')
+    display(neg_pct_df)
+    
+    print("\n")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VISUALIZATION 1: Rolling Changes Over Time (All Windows)
+# ══════════════════════════════════════════════════════════════════════════════
+
+if len(windows) > 0:
+    fig, axes = plt.subplots(len(windows), 2, figsize=(16, 4*len(windows)))
+    
+    # Handle single window case (axes won't be 2D)
+    if len(windows) == 1:
+        axes = axes.reshape(1, -1)
+    
+    for i, window in enumerate(windows):
+        data = rolling_results[window]
+        dates = data['end_dates']
+        dollar_changes = data['dollar_changes']
+        pct_changes = data['pct_changes']
+        
+        # Dollar changes
+        ax1 = axes[i, 0]
+        ax1.scatter(dates, dollar_changes, alpha=0.5, s=10, color='steelblue', edgecolor='none')
+        ax1.axhline(0, color='black', linewidth=1, linestyle='-', alpha=0.5)
+        ax1.fill_between(dates, 0, dollar_changes, 
+                          where=(np.array(dollar_changes) >= 0), color='green', alpha=0.2, interpolate=True)
+        ax1.fill_between(dates, 0, dollar_changes, 
+                          where=(np.array(dollar_changes) < 0), color='red', alpha=0.2, interpolate=True)
+        ax1.set_ylabel(f'{window}-day Change (USD)')
+        ax1.set_title(f'{window}-Day Rolling Dollar Changes')
+        ax1.grid(True, alpha=0.3)
+        ax1.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m'))
+        
+        # Percentage changes
+        ax2 = axes[i, 1]
+        ax2.scatter(dates, pct_changes, alpha=0.5, s=10, color='steelblue', edgecolor='none')
+        ax2.axhline(0, color='black', linewidth=1, linestyle='-', alpha=0.5)
+        ax2.fill_between(dates, 0, pct_changes, 
+                          where=(np.array(pct_changes) >= 0), color='green', alpha=0.2, interpolate=True)
+        ax2.fill_between(dates, 0, pct_changes, 
+                          where=(np.array(pct_changes) < 0), color='red', alpha=0.2, interpolate=True)
+        ax2.set_ylabel(f'{window}-day Change (%)')
+        ax2.set_title(f'{window}-Day Rolling Percentage Changes')
+        ax2.grid(True, alpha=0.3)
+        ax2.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m'))
+    
+    plt.tight_layout()
+    date_suffix = f" (from {MIN_DATE})" if MIN_DATE else ""
+    plt.suptitle(f'Rolling Window Changes Over Time{date_suffix}', y=1.001, fontsize=14, fontweight='bold')
+    plt.show()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VISUALIZATION 2: Distribution Comparison Across Windows
+# ══════════════════════════════════════════════════════════════════════════════
+
+if len(windows) > 0:
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    colors = plt.cm.viridis(np.linspace(0, 1, len(windows)))
+    
+    # Dollar change distributions
+    for i, window in enumerate(windows):
+        data = rolling_results[window]
+        ax1.hist(data['dollar_changes'], bins=100, alpha=0.5, 
+                 color=colors[i], label=f'{window}-day', edgecolor='none')
+    
+    ax1.axvline(0, color='red', linewidth=2, linestyle='--', alpha=0.7)
+    ax1.set_xlabel('Dollar Change (USD)')
+    ax1.set_ylabel('Frequency')
+    date_suffix = f" (from {MIN_DATE})" if MIN_DATE else ""
+    ax1.set_title(f'Distribution of Rolling Dollar Changes{date_suffix}')
+    ax1.legend(loc='upper right')
+    ax1.grid(True, alpha=0.3)
+    
+    # Percentage change distributions
+    for i, window in enumerate(windows):
+        data = rolling_results[window]
+        ax2.hist(data['pct_changes'], bins=100, alpha=0.5, 
+                 color=colors[i], label=f'{window}-day', edgecolor='none')
+    
+    ax2.axvline(0, color='red', linewidth=2, linestyle='--', alpha=0.7)
+    ax2.set_xlabel('Percentage Change (%)')
+    ax2.set_ylabel('Frequency')
+    ax2.set_title(f'Distribution of Rolling Percentage Changes{date_suffix}')
+    ax2.legend(loc='upper right')
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VISUALIZATION 3: Extreme Events Highlighted on Timeline
+# ══════════════════════════════════════════════════════════════════════════════
+
+for window in windows:
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10))
+    
+    data = rolling_results[window]
+    dates = data['end_dates']
+    dollar_changes = data['dollar_changes']
+    pct_changes = data['pct_changes']
+    
+    # Determine how many to highlight (top 100 or fewer)
+    n_highlight = min(100, len(dollar_changes))
+    
+    # Get top N indices
+    pos_dollar_idx = np.argsort(dollar_changes)[-n_highlight:]
+    neg_dollar_idx = np.argsort(dollar_changes)[:n_highlight]
+    pos_pct_idx = np.argsort(pct_changes)[-n_highlight:]
+    neg_pct_idx = np.argsort(pct_changes)[:n_highlight]
+    
+    # DOLLAR CHANGES PLOT
+    # All data in gray
+    ax1.scatter(dates, dollar_changes, color='gray', alpha=0.3, s=15, label='All periods')
+    
+    # Highlight top N positive
+    pos_dates = [dates[i] for i in pos_dollar_idx]
+    pos_values = [dollar_changes[i] for i in pos_dollar_idx]
+    ax1.scatter(pos_dates, pos_values, color='green', alpha=0.7, s=50, 
+                label=f'Top {n_highlight} Gains', edgecolor='darkgreen', linewidth=0.5)
+    
+    # Highlight top N negative
+    neg_dates = [dates[i] for i in neg_dollar_idx]
+    neg_values = [dollar_changes[i] for i in neg_dollar_idx]
+    ax1.scatter(neg_dates, neg_values, color='red', alpha=0.7, s=50, 
+                label=f'Top {n_highlight} Losses', edgecolor='darkred', linewidth=0.5)
+    
+    ax1.axhline(0, color='black', linewidth=1, linestyle='-', alpha=0.5)
+    ax1.set_ylabel(f'{window}-day Dollar Change (USD)')
+    date_suffix = f" (from {MIN_DATE})" if MIN_DATE else ""
+    ax1.set_title(f'{window}-Day Rolling Dollar Changes - Top {n_highlight} Gains/Losses Highlighted{date_suffix}')
+    ax1.legend(loc='upper left')
+    ax1.grid(True, alpha=0.3)
+    ax1.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m'))
+    
+    # PERCENTAGE CHANGES PLOT
+    # All data in gray
+    ax2.scatter(dates, pct_changes, color='gray', alpha=0.3, s=15, label='All periods')
+    
+    # Highlight top N positive
+    pos_dates_pct = [dates[i] for i in pos_pct_idx]
+    pos_values_pct = [pct_changes[i] for i in pos_pct_idx]
+    ax2.scatter(pos_dates_pct, pos_values_pct, color='green', alpha=0.7, s=50, 
+                label=f'Top {n_highlight} Gains', edgecolor='darkgreen', linewidth=0.5)
+    
+    # Highlight top N negative
+    neg_dates_pct = [dates[i] for i in neg_pct_idx]
+    neg_values_pct = [pct_changes[i] for i in neg_pct_idx]
+    ax2.scatter(neg_dates_pct, neg_values_pct, color='red', alpha=0.7, s=50, 
+                label=f'Top {n_highlight} Losses', edgecolor='darkred', linewidth=0.5)
+    
+    ax2.axhline(0, color='black', linewidth=1, linestyle='-', alpha=0.5)
+    ax2.set_xlabel('Date')
+    ax2.set_ylabel(f'{window}-day Percentage Change (%)')
+    ax2.set_title(f'{window}-Day Rolling Percentage Changes - Top {n_highlight} Gains/Losses Highlighted{date_suffix}')
+    ax2.legend(loc='upper left')
+    ax2.grid(True, alpha=0.3)
+    ax2.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%Y-%m'))
+    
+    plt.tight_layout()
+    plt.show()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VISUALIZATION 4: Max Gain/Loss Comparison Across Windows
+# ══════════════════════════════════════════════════════════════════════════════
+
+if len(windows) > 0:
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    max_gains_dollar = [np.max(rolling_results[w]['dollar_changes']) for w in windows]
+    max_losses_dollar = [np.min(rolling_results[w]['dollar_changes']) for w in windows]
+    max_gains_pct = [np.max(rolling_results[w]['pct_changes']) for w in windows]
+    max_losses_pct = [np.min(rolling_results[w]['pct_changes']) for w in windows]
+    
+    x_pos = np.arange(len(windows))
+    width = 0.35
+    
+    # Dollar changes
+    ax1.bar(x_pos - width/2, max_gains_dollar, width, label='Max Gain', color='green', alpha=0.7)
+    ax1.bar(x_pos + width/2, np.abs(max_losses_dollar), width, label='Max Loss (abs)', color='red', alpha=0.7)
+    ax1.set_xlabel('Rolling Window Size (days)')
+    ax1.set_ylabel('Maximum Dollar Change (USD)')
+    date_suffix = f"\n(from {MIN_DATE})" if MIN_DATE else ""
+    ax1.set_title(f'Maximum Gains/Losses by Window Size (Dollar){date_suffix}')
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels([f'{w}d' for w in windows])
+    ax1.legend()
+    ax1.grid(True, alpha=0.3, axis='y')
+    
+    # Percentage changes
+    ax2.bar(x_pos - width/2, max_gains_pct, width, label='Max Gain', color='green', alpha=0.7)
+    ax2.bar(x_pos + width/2, np.abs(max_losses_pct), width, label='Max Loss (abs)', color='red', alpha=0.7)
+    ax2.set_xlabel('Rolling Window Size (days)')
+    ax2.set_ylabel('Maximum Percentage Change (%)')
+    ax2.set_title(f'Maximum Gains/Losses by Window Size (Percentage){date_suffix}')
+    ax2.set_xticks(x_pos)
+    ax2.set_xticklabels([f'{w}d' for w in windows])
+    ax2.legend()
+    ax2.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.show()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VISUALIZATION 5: Box Plots Comparing Windows
+# ══════════════════════════════════════════════════════════════════════════════
+
+if len(windows) > 0:
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    
+    # Dollar changes boxplot
+    dollar_data = [rolling_results[w]['dollar_changes'] for w in windows]
+    bp1 = ax1.boxplot(dollar_data, labels=[f'{w}d' for w in windows], patch_artist=True)
+    for patch in bp1['boxes']:
+        patch.set_facecolor('steelblue')
+        patch.set_alpha(0.6)
+    ax1.axhline(0, color='red', linewidth=1, linestyle='--', alpha=0.5)
+    ax1.set_xlabel('Rolling Window Size')
+    ax1.set_ylabel('Dollar Change (USD)')
+    date_suffix = f"\n(from {MIN_DATE})" if MIN_DATE else ""
+    ax1.set_title(f'Distribution of Dollar Changes by Window Size{date_suffix}')
+    ax1.grid(True, alpha=0.3, axis='y')
+    
+    # Percentage changes boxplot
+    pct_data = [rolling_results[w]['pct_changes'] for w in windows]
+    bp2 = ax2.boxplot(pct_data, labels=[f'{w}d' for w in windows], patch_artist=True)
+    for patch in bp2['boxes']:
+        patch.set_facecolor('steelblue')
+        patch.set_alpha(0.6)
+    ax2.axhline(0, color='red', linewidth=1, linestyle='--', alpha=0.5)
+    ax2.set_xlabel('Rolling Window Size')
+    ax2.set_ylabel('Percentage Change (%)')
+    ax2.set_title(f'Distribution of Percentage Changes by Window Size{date_suffix}')
+    ax2.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.show()
+
+print("="*80)
+print("✓ ALL ROLLING WINDOW ANALYSIS COMPLETE!")
+print("="*80)
