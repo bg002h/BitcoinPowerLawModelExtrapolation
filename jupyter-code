@@ -59,7 +59,7 @@ valid = y_data > 0
 y_valid = y_data[valid]
 x_dates_valid = x_dates[valid]
 
-genesis = pd.to_datetime('2009-01-03')
+genesis = pd.to_datetime('2009-01-9')
 years_since = (x_dates_valid - genesis).dt.days / 365.25
 years_valid = years_since.astype(float)
 
@@ -177,7 +177,9 @@ else:
     plt.figure(figsize=(12, 7.5))
 
     # ── Midnight Gold color scheme ────────────────────────────────
-    plt.gca().set_facecolor('#0a0e17')          # deep midnight navy-black
+    plt.gca().set_facecolor('white')    
+
+#plt.gca().set_facecolor('#0a0e17')          # deep midnight navy-black
 
     # Grids
     plt.grid(which='major', axis='both', color='#334155', linestyle='-', linewidth=0.9, alpha=0.6)
