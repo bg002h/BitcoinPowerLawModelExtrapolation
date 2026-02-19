@@ -1,0 +1,866 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# SUPPORT + BUBBLE COMPONENTS MODEL v3 — Bitcoin Price
+#
+# Self-contained cell: loads CSV, fits a power law through the bottom Nth
+# percentile (the "support line"), then detects and fits discrete bubble
+# components on top of it.
+#
+# Model:
+#   log₁₀(price) = log₁₀(support(t)) + Σ bubble_i(t)
+#
+#   support(t) = A · t^B            power law floor
+#   bubble_i(t) = log₁₀ excess ≥ 0  each bubble adds multiplicative excess
+#
+# Each bubble has 5 parameters:
+#   t_start   = when the bubble begins rising
+#   τ_rise    = exponential rise time constant
+#   t_plateau = duration of plateau (peak) phase
+#   τ_fall    = exponential fall time constant
+#   scale     = peak amplitude (in log₁₀, e.g. 0.7 ≈ 5× support)
+#
+# Constraints:
+#   MIN_BUBBLES          — minimum number of bubbles (threshold lowered until met)
+#   MAX_BUBBLES          — maximum number (keep N largest by peak excess)
+#   MAX_BUBBLE_GAP       — force a bubble if none found within this many years
+#   MIN_INTERBUBBLE_PERIOD — drop later bubble if two starts are closer than this
+# ══════════════════════════════════════════════════════════════════════════════
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import differential_evolution
+from scipy.stats import linregress
+from matplotlib.ticker import FixedLocator, StrMethodFormatter, NullFormatter
+import statsmodels.api as sm
+import warnings
+warnings.filterwarnings('ignore')
+
+# ── CONFIGURATION ─────────────────────────────────────────────────────────────
+csv_path = './bitcoin/BitcoinPriceDaily.csv'
+
+# Support line: quantile regression on bottom Nth percentile
+SUPPORT_PERCENTILE = 29  # bottom 15% of OLS residuals → support floor
+SUPPORT_QUANTILE   = 0.50  # quantile to fit within that bottom slice
+
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │  BUBBLE DETECTION CONSTRAINTS                                              │
+# └─────────────────────────────────────────────────────────────────────────────┘
+BUBBLE_THRESHOLD = 0.22  # initial min log₁₀ excess (≈ 1.6×); auto-lowered if needed
+BUBBLE_MIN_DURATION = 60   # minimum bubble duration in days
+BUBBLE_MERGE_GAP = 180    # merge bubble regions closer than this many days
+SMOOTHING_WINDOW = 30      # days for smoothing residuals before detection
+
+MIN_BUBBLES = 3            # minimum number of bubbles — threshold lowered until met
+MAX_BUBBLES = 5            # maximum number — keep N largest by peak excess
+MAX_BUBBLE_GAP = 3.875      # force a bubble if none within this many years (None to disable)
+MIN_INTERBUBBLE_PERIOD = 0.25  # years — drop later bubble if two starts are closer
+
+# Fitting
+DE_MAXITER = 3000
+DE_POPSIZE = 20
+
+# Date masks
+FIT_MIN_DATE = '2010-01-01'        # e.g. '2011-01-01' or None
+FIT_MAX_DATE = None #'2023-01-01'        # e.g. '2024-01-01' or None (for backtesting)
+
+# Prediction
+N_FUTURE_BUBBLES = 2       # how many future bubbles to predict
+
+pd.set_option('display.max_rows', 50)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_colwidth', None)
+pd.set_option('display.width', None)
+
+# ── Load and clean data ──────────────────────────────────────────────────────
+try:
+    df = pd.read_csv(csv_path)
+    print("CSV loaded successfully!")
+    print(f"Shape: {df.shape}")
+except FileNotFoundError:
+    print(f"File not found: {csv_path}")
+except Exception as e:
+    print("Error loading CSV:", str(e))
+
+date_column  = 'Date'
+value_column = 'Price'
+
+df[date_column] = pd.to_datetime(df[date_column], format='%m/%d/%y', errors='coerce')
+df = df.dropna(subset=[date_column])
+df = df.sort_values(date_column)
+
+x_dates = df[date_column]
+y_data  = df[value_column].astype(float)
+
+print(f"\nDate range: {x_dates.min().strftime('%Y-%m')} to {x_dates.max().strftime('%Y-%m')}")
+print(f"Valid points: {len(y_data)}")
+print(f"Price range: ${y_data.min():,.2f} – ${y_data.max():,.2f}")
+
+# ── Prepare data ─────────────────────────────────────────────────────────────
+valid = y_data > 0
+y_valid = y_data[valid]
+x_dates_valid = x_dates[valid]
+
+genesis = pd.to_datetime('2009-01-09')
+years_since = (x_dates_valid - genesis).dt.days / 365.25
+years_valid = years_since.astype(float)
+
+MIN_YEARS = 1.0
+reasonable = years_valid >= MIN_YEARS
+years_all = years_valid[reasonable].values
+y_all     = y_valid[reasonable].values
+dates_all = x_dates_valid[reasonable].values
+
+log_t_all = np.log10(years_all)
+log_p_all = np.log10(y_all)
+
+# ── Date masks ───────────────────────────────────────────────────────────────
+fit_mask = np.ones(len(dates_all), dtype=bool)
+if FIT_MIN_DATE is not None:
+    fit_mask &= pd.to_datetime(dates_all) >= pd.to_datetime(FIT_MIN_DATE)
+if FIT_MAX_DATE is not None:
+    fit_mask &= pd.to_datetime(dates_all) <= pd.to_datetime(FIT_MAX_DATE)
+
+log_t = log_t_all[fit_mask]
+log_p = log_p_all[fit_mask]
+years_fit = years_all[fit_mask]
+dates_fit = dates_all[fit_mask]
+
+date_desc = "all data"
+if FIT_MIN_DATE and FIT_MAX_DATE:
+    date_desc = f"{FIT_MIN_DATE} to {FIT_MAX_DATE}"
+elif FIT_MIN_DATE:
+    date_desc = f"from {FIT_MIN_DATE}"
+elif FIT_MAX_DATE:
+    date_desc = f"up to {FIT_MAX_DATE}"
+print(f"\nFit date range: {date_desc} ({len(log_t)} points)")
+
+fit_min_years = (pd.to_datetime(FIT_MIN_DATE) - genesis).days / 365.25 if FIT_MIN_DATE else None
+fit_max_years = (pd.to_datetime(FIT_MAX_DATE) - genesis).days / 365.25 if FIT_MAX_DATE else None
+today_years = (pd.to_datetime('today') - genesis).days / 365.25
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 1: FIT SUPPORT LINE
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 80)
+print(f"STEP 1: FITTING SUPPORT LINE (bottom {SUPPORT_PERCENTILE}% of data)")
+print("=" * 80)
+
+slope_ols, intercept_ols, r_ols, _, _ = linregress(log_t, log_p)
+ols_resid = log_p - (intercept_ols + slope_ols * log_t)
+cutoff = np.percentile(ols_resid, SUPPORT_PERCENTILE)
+
+support_mask = ols_resid <= cutoff
+log_t_support = log_t[support_mask]
+log_p_support = log_p[support_mask]
+
+print(f"  OLS residual cutoff: {cutoff:+.4f}")
+print(f"  Support points: {np.sum(support_mask)} / {len(log_t)}")
+
+X_support = sm.add_constant(log_t_support)
+model_support = sm.QuantReg(log_p_support, X_support)
+result_support = model_support.fit(q=SUPPORT_QUANTILE, max_iter=10000)
+
+intercept_sup = result_support.params[0]
+slope_sup = result_support.params[1]
+A_sup = 10 ** intercept_sup
+B_sup = slope_sup
+
+print(f"  Support power law: price = {A_sup:.4e} × t^{B_sup:.4f}")
+
+log_support_all = intercept_sup + slope_sup * log_t_all
+support_all = 10 ** log_support_all
+log_support_fit = intercept_sup + slope_sup * log_t
+support_fit = 10 ** log_support_fit
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2: DETECT BUBBLE REGIONS (with all constraints)
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 80)
+print("STEP 2: DETECTING BUBBLE REGIONS")
+print("=" * 80)
+
+log_excess_all = log_p_all - log_support_all
+log_excess_fit = log_p - log_support_fit
+
+excess_smooth = pd.Series(log_excess_fit).rolling(
+    window=SMOOTHING_WINDOW, center=True, min_periods=20).mean().values
+
+
+def detect_regions(threshold):
+    """Detect bubble regions at a given threshold."""
+    above = excess_smooth > threshold
+    above[np.isnan(excess_smooth)] = False
+
+    regs = []
+    in_region = False
+    for i in range(len(above)):
+        if above[i] and not in_region:
+            region_start = i
+            in_region = True
+        elif not above[i] and in_region:
+            regs.append((region_start, i - 1))
+            in_region = False
+    if in_region:
+        regs.append((region_start, len(above) - 1))
+
+    # Filter by minimum duration
+    regs = [(s, e) for s, e in regs
+            if (years_fit[e] - years_fit[s]) * 365.25 >= BUBBLE_MIN_DURATION]
+
+    # Merge close regions
+    merged = []
+    for s, e in regs:
+        if merged and (years_fit[s] - years_fit[merged[-1][1]]) * 365.25 < BUBBLE_MERGE_GAP:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+
+    return merged
+
+
+# ── 2a: Auto-lower threshold until MIN_BUBBLES is met ────────────────────────
+current_threshold = BUBBLE_THRESHOLD
+regions = detect_regions(current_threshold)
+attempts = 0
+
+while len(regions) < MIN_BUBBLES and current_threshold > 0.02:
+    current_threshold *= 0.8  # reduce by 20%
+    regions = detect_regions(current_threshold)
+    attempts += 1
+
+if attempts > 0:
+    print(f"  Threshold auto-lowered: {BUBBLE_THRESHOLD:.3f} → {current_threshold:.3f} "
+          f"({attempts} steps to reach ≥{MIN_BUBBLES} bubbles)")
+else:
+    print(f"  Threshold: {current_threshold:.3f} log₁₀ ({10**current_threshold:.1f}× support)")
+
+print(f"  Initial regions detected: {len(regions)}")
+
+# ── 2b: Enforce MAX_BUBBLE_GAP (insert synthetics) ───────────────────────────
+if MAX_BUBBLE_GAP is not None and len(regions) > 0:
+    region_starts = [years_fit[s] for s, e in regions]
+    data_start = years_fit[0]
+
+    gaps_to_fill = []
+
+    # Gap from data start to first bubble
+    if region_starts[0] - data_start > MAX_BUBBLE_GAP:
+        t_cursor = data_start + MAX_BUBBLE_GAP / 2
+        while t_cursor < region_starts[0] - MAX_BUBBLE_GAP / 2:
+            gaps_to_fill.append(t_cursor)
+            t_cursor += MAX_BUBBLE_GAP
+
+    # Gaps between consecutive bubbles
+    for i in range(len(region_starts) - 1):
+        gap = region_starts[i + 1] - region_starts[i]
+        if gap > MAX_BUBBLE_GAP:
+            n_missing = int(np.ceil(gap / MAX_BUBBLE_GAP)) - 1
+            for j in range(1, n_missing + 1):
+                fill_time = region_starts[i] + j * gap / (n_missing + 1)
+                gaps_to_fill.append(fill_time)
+
+    synthetic_regions = []
+    for fill_t in gaps_to_fill:
+        search_start = np.argmin(np.abs(years_fit - (fill_t - 0.5)))
+        search_end = np.argmin(np.abs(years_fit - (fill_t + 0.5)))
+        search_start = max(0, search_start)
+        search_end = min(len(years_fit) - 1, search_end)
+
+        if search_end > search_start:
+            local_excess = log_excess_fit[search_start:search_end+1]
+            local_peak = search_start + np.argmax(local_excess)
+            half_width_idx = max(30, int(BUBBLE_MIN_DURATION / 2))
+            syn_s = max(0, local_peak - half_width_idx)
+            syn_e = min(len(years_fit) - 1, local_peak + half_width_idx)
+            synthetic_regions.append((syn_s, syn_e))
+
+            syn_date = pd.Timestamp(dates_fit[local_peak])
+            print(f"    SYNTHETIC: Inserted near {syn_date.strftime('%Y-%m-%d')}")
+
+    all_regions = regions + synthetic_regions
+    all_regions.sort(key=lambda x: x[0])
+
+    # Re-merge overlapping
+    merged_final = []
+    for s, e in all_regions:
+        if merged_final and years_fit[s] - years_fit[merged_final[-1][1]] < BUBBLE_MERGE_GAP / 365.25:
+            merged_final[-1] = (merged_final[-1][0], max(merged_final[-1][1], e))
+        else:
+            merged_final.append((s, e))
+    regions = merged_final
+    print(f"  After gap enforcement: {len(regions)} regions")
+
+# ── 2c: Enforce MIN_INTERBUBBLE_PERIOD (drop later if too close) ─────────────
+if MIN_INTERBUBBLE_PERIOD is not None and len(regions) > 1:
+    filtered = [regions[0]]
+    dropped_count = 0
+    for i in range(1, len(regions)):
+        prev_start = years_fit[filtered[-1][0]]
+        curr_start = years_fit[regions[i][0]]
+        if curr_start - prev_start >= MIN_INTERBUBBLE_PERIOD:
+            filtered.append(regions[i])
+        else:
+            dropped_count += 1
+    if dropped_count > 0:
+        print(f"  Dropped {dropped_count} regions too close (< {MIN_INTERBUBBLE_PERIOD} yr apart)")
+    regions = filtered
+
+# ── 2d: Enforce MAX_BUBBLES (keep N largest by peak excess) ──────────────────
+if MAX_BUBBLES is not None and len(regions) > MAX_BUBBLES:
+    # Score each region by its peak excess
+    scored = []
+    for s, e in regions:
+        peak_val = np.max(log_excess_fit[s:e+1])
+        scored.append((peak_val, s, e))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    kept = scored[:MAX_BUBBLES]
+    kept.sort(key=lambda x: x[1])  # re-sort by time
+    regions = [(s, e) for _, s, e in kept]
+    print(f"  Trimmed to {MAX_BUBBLES} largest bubbles (dropped {len(scored) - MAX_BUBBLES})")
+
+# ── 2e: Final report ─────────────────────────────────────────────────────────
+print(f"\n  FINAL: {len(regions)} bubble regions:")
+for i, (s, e) in enumerate(regions):
+    d_start = pd.Timestamp(dates_fit[s])
+    d_end = pd.Timestamp(dates_fit[e])
+    peak_idx = s + np.argmax(log_excess_fit[s:e+1])
+    peak_val = log_excess_fit[peak_idx]
+    d_peak = pd.Timestamp(dates_fit[peak_idx])
+    duration_days = (d_end - d_start).days
+    print(f"    Bubble {i+1}: {d_start.strftime('%Y-%m-%d')} to {d_end.strftime('%Y-%m-%d')}  "
+          f"({duration_days}d)  peak: {d_peak.strftime('%Y-%m-%d')}  "
+          f"excess: {peak_val:.3f} ({10**peak_val:.1f}×)")
+
+if len(regions) < MIN_BUBBLES:
+    print(f"\n  ⚠ WARNING: Only {len(regions)} bubbles found (min requested: {MIN_BUBBLES}).")
+    print(f"    Try lowering BUBBLE_THRESHOLD or BUBBLE_MIN_DURATION.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3: FIT INDIVIDUAL BUBBLE COMPONENTS
+# ══════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 80)
+print("STEP 3: FITTING BUBBLE COMPONENTS")
+print("=" * 80)
+
+
+def bubble_shape(t, t_start, tau_rise, t_plateau_dur, tau_fall, scale):
+    """
+    Single bubble component (returns log₁₀ excess ≥ 0).
+    Rise → Plateau → Fall.
+    """
+    result = np.zeros_like(t, dtype=float)
+
+    t_rise_end = t_start + 3.0 * tau_rise
+    t_fall_start = t_rise_end + t_plateau_dur
+
+    rising = (t >= t_start) & (t < t_rise_end)
+    result[rising] = scale * (1 - np.exp(-(t[rising] - t_start) / tau_rise))
+
+    plateau = (t >= t_rise_end) & (t < t_fall_start)
+    result[plateau] = scale
+
+    falling = t >= t_fall_start
+    result[falling] = scale * np.exp(-(t[falling] - t_fall_start) / tau_fall)
+
+    return np.maximum(result, 0)
+
+
+def fit_single_bubble(region_idx, s, e):
+    """Fit a single bubble to a detected region with wider context."""
+    context_years = 1.0
+
+    t_region_start = years_fit[s]
+    t_region_end = years_fit[e]
+    t_context_start = max(years_fit[0], t_region_start - context_years)
+    t_context_end = min(years_fit[-1], t_region_end + context_years)
+
+    ctx_mask = (years_fit >= t_context_start) & (years_fit <= t_context_end)
+    t_ctx = years_fit[ctx_mask]
+    excess_ctx = np.maximum(0, log_excess_fit[ctx_mask])
+
+    bounds = [
+        (t_region_start - context_years, t_region_start + 0.3),
+        (0.05, 2.0),     # tau_rise
+        (0.0, 1.5),      # t_plateau_dur
+        (0.05, 2.0),     # tau_fall
+        (0.01, 3.0),     # scale
+    ]
+
+    def objective(params):
+        t_start, tau_rise, t_plateau_dur, tau_fall, scale = params
+        pred = bubble_shape(t_ctx, t_start, tau_rise, t_plateau_dur, tau_fall, scale)
+        return np.sum((excess_ctx - pred) ** 2)
+
+    result = differential_evolution(
+        objective, bounds,
+        maxiter=DE_MAXITER, popsize=DE_POPSIZE,
+        seed=42 + region_idx, tol=1e-10, polish=True
+    )
+
+    return result.x, result.fun
+
+
+bubble_params = []
+for i, (s, e) in enumerate(regions):
+    params, cost = fit_single_bubble(i, s, e)
+    t_start, tau_rise, t_plateau_dur, tau_fall, scale = params
+
+    t_rise_end = t_start + 3.0 * tau_rise
+    t_fall_start = t_rise_end + t_plateau_dur
+    total_duration = (t_fall_start + 3.0 * tau_fall) - t_start
+
+    d_start = genesis + pd.Timedelta(days=t_start * 365.25)
+    d_peak_approx = genesis + pd.Timedelta(days=t_rise_end * 365.25)
+
+    bubble_params.append({
+        't_start': t_start, 'tau_rise': tau_rise,
+        't_plateau_dur': t_plateau_dur, 'tau_fall': tau_fall,
+        'scale': scale, 'cost': cost,
+        'date_start': d_start, 'date_peak': d_peak_approx,
+        'total_duration': total_duration,
+    })
+
+    print(f"\n  Bubble {i+1}:")
+    print(f"    Start:       t={t_start:.3f} yr  ({d_start.strftime('%Y-%m-%d')})")
+    print(f"    τ_rise:      {tau_rise:.4f} yr  ({tau_rise*365.25:.0f} days)")
+    print(f"    Plateau:     {t_plateau_dur:.4f} yr  ({t_plateau_dur*365.25:.0f} days)")
+    print(f"    τ_fall:      {tau_fall:.4f} yr  ({tau_fall*365.25:.0f} days)")
+    print(f"    Scale:       {scale:.4f} log₁₀  ({10**scale:.1f}× support)")
+    print(f"    Duration:    {total_duration:.2f} yr")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 4: COMPUTE COMPOSITE MODEL
+# ══════════════════════════════════════════════════════════════════════════════
+years_plot = np.linspace(1.0, 42.0, 3000)
+log_t_plot = np.log10(years_plot)
+
+log_support_plot = intercept_sup + slope_sup * log_t_plot
+support_plot = 10 ** log_support_plot
+
+total_bubble_plot = np.zeros_like(years_plot)
+individual_bubbles_plot = []
+for bp in bubble_params:
+    bub = bubble_shape(years_plot, bp['t_start'], bp['tau_rise'],
+                       bp['t_plateau_dur'], bp['tau_fall'], bp['scale'])
+    individual_bubbles_plot.append(bub)
+    total_bubble_plot += bub
+
+composite_plot = 10 ** (log_support_plot + total_bubble_plot)
+
+# R²
+total_bubble_all = np.zeros(len(years_all))
+for bp in bubble_params:
+    total_bubble_all += bubble_shape(years_all, bp['t_start'], bp['tau_rise'],
+                                     bp['t_plateau_dur'], bp['tau_fall'], bp['scale'])
+composite_pred_all = log_support_all + total_bubble_all
+ss_res_comp = np.sum((log_p_all - composite_pred_all) ** 2)
+ss_tot_all = np.sum((log_p_all - np.mean(log_p_all)) ** 2)
+r2_composite = 1 - ss_res_comp / ss_tot_all
+
+ss_res_support = np.sum((log_p_all - log_support_all) ** 2)
+r2_support = 1 - ss_res_support / ss_tot_all
+
+print(f"\n\n{'=' * 80}")
+print(f"MODEL FIT QUALITY")
+print(f"{'=' * 80}")
+print(f"  R² (support only):     {r2_support:.6f}")
+print(f"  R² (support + bubbles):{r2_composite:.6f}")
+print(f"  ΔR²:                   {r2_composite - r2_support:.6f}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 5: BUBBLE PARAMETER TABLE
+# ══════════════════════════════════════════════════════════════════════════════
+print(f"\n{'=' * 120}")
+print(f"BUBBLE PARAMETER TABLE")
+print(f"{'=' * 120}")
+print(f"  {'#':>3}  {'Start Date':>12}  {'t_start':>8}  {'τ_rise':>8}  {'Plateau':>8}  "
+      f"{'τ_fall':>8}  {'Scale':>7}  {'Peak ×':>7}  {'Duration':>9}  {'Δt_start':>9}")
+print("-" * 120)
+
+for i, bp in enumerate(bubble_params):
+    dt_start = ""
+    if i > 0:
+        dt = bp['t_start'] - bubble_params[i-1]['t_start']
+        dt_start = f"{dt:.2f} yr"
+
+    print(f"  {i+1:>3}  {bp['date_start'].strftime('%Y-%m-%d'):>12}  "
+          f"{bp['t_start']:>8.3f}  {bp['tau_rise']:>8.4f}  {bp['t_plateau_dur']:>8.4f}  "
+          f"{bp['tau_fall']:>8.4f}  {bp['scale']:>7.3f}  {10**bp['scale']:>7.1f}×  "
+          f"{bp['total_duration']:>8.2f}yr  {dt_start:>9}")
+
+if len(bubble_params) >= 2:
+    starts = [bp['t_start'] for bp in bubble_params]
+    intervals = [starts[i+1] - starts[i] for i in range(len(starts)-1)]
+    log_starts = [np.log10(s) for s in starts if s > 0]
+    log_intervals = [log_starts[i+1] - log_starts[i] for i in range(len(log_starts)-1)]
+
+    print(f"\n  INTER-BUBBLE TIMING:")
+    print(f"    Linear intervals (years):  {['%.2f' % d for d in intervals]}")
+    if log_intervals:
+        print(f"    Log₁₀ intervals:           {['%.4f' % d for d in log_intervals]}")
+    print(f"    Mean linear interval:       {np.mean(intervals):.2f} yr")
+    if log_intervals:
+        print(f"    Mean log₁₀ interval:        {np.mean(log_intervals):.4f}")
+
+    cv_lin = np.std(intervals) / np.mean(intervals) if len(intervals) > 1 else 0
+    cv_log = np.std(log_intervals) / np.mean(log_intervals) if len(log_intervals) > 1 else 0
+    print(f"    CV linear: {cv_lin:.3f}   CV log: {cv_log:.3f}")
+
+    print(f"\n  PARAMETER TRENDS:")
+    print(f"    τ_rise:    {['%.3f' % bp['tau_rise'] for bp in bubble_params]}")
+    print(f"    τ_fall:    {['%.3f' % bp['tau_fall'] for bp in bubble_params]}")
+    print(f"    Scale:     {['%.3f' % bp['scale'] for bp in bubble_params]}")
+    print(f"    Plateau:   {['%.3f' % bp['t_plateau_dur'] for bp in bubble_params]}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 6: PREDICT FUTURE BUBBLES
+# ══════════════════════════════════════════════════════════════════════════════
+print(f"\n{'=' * 80}")
+print(f"STEP 6: PREDICTING NEXT {N_FUTURE_BUBBLES} BUBBLES")
+print(f"{'=' * 80}")
+
+future_bubbles = []
+
+if len(bubble_params) >= 2:
+    starts = [bp['t_start'] for bp in bubble_params]
+    intervals = [starts[i+1] - starts[i] for i in range(len(starts)-1)]
+
+    n_recent = min(3, len(bubble_params))
+    recent = bubble_params[-n_recent:]
+
+    mean_tau_rise = np.mean([bp['tau_rise'] for bp in recent])
+    mean_tau_fall = np.mean([bp['tau_fall'] for bp in recent])
+    mean_scale = np.mean([bp['scale'] for bp in recent])
+    mean_plateau = np.mean([bp['t_plateau_dur'] for bp in recent])
+
+    mean_interval = np.mean(intervals)
+    last_start = starts[-1]
+
+    if len(intervals) >= 2:
+        interval_trend = np.polyfit(range(len(intervals)), intervals, 1)
+        print(f"  Interval trend: {interval_trend[0]:+.3f} yr per cycle")
+    else:
+        interval_trend = [0, mean_interval]
+
+    print(f"\n  Using mean interval: {mean_interval:.2f} yr")
+    print(f"  Mean shape: τ_rise={mean_tau_rise:.3f}, plateau={mean_plateau:.3f}, "
+          f"τ_fall={mean_tau_fall:.3f}, scale={mean_scale:.3f}")
+
+    for j in range(N_FUTURE_BUBBLES):
+        next_interval = interval_trend[0] * (len(intervals) + j) + interval_trend[1]
+        next_interval = max(next_interval, MIN_INTERBUBBLE_PERIOD)
+
+        if j == 0:
+            pred_start = last_start + next_interval
+        else:
+            pred_start = future_bubbles[-1]['t_start'] + next_interval
+
+        pred_date = genesis + pd.Timedelta(days=pred_start * 365.25)
+
+        scale_decay = 0.9 ** j
+        pred_scale = mean_scale * scale_decay
+
+        fb = {
+            't_start': pred_start,
+            'tau_rise': mean_tau_rise,
+            't_plateau_dur': mean_plateau,
+            'tau_fall': mean_tau_fall,
+            'scale': pred_scale,
+            'date_start': pred_date,
+            'interval': next_interval,
+        }
+        future_bubbles.append(fb)
+
+        pred_peak_date = pred_date + pd.Timedelta(days=3 * mean_tau_rise * 365.25)
+        support_at_peak = A_sup * (pred_start + 3*mean_tau_rise) ** B_sup
+        peak_price = support_at_peak * 10**pred_scale
+
+        print(f"\n  Predicted Bubble {len(bubble_params) + j + 1}:")
+        print(f"    Start:      t={pred_start:.2f} yr  ({pred_date.strftime('%Y-%m-%d')})")
+        print(f"    Peak:       ~{pred_peak_date.strftime('%Y-%m-%d')}")
+        print(f"    Interval:   {next_interval:.2f} yr from previous")
+        print(f"    Support at peak: ${support_at_peak:,.0f}")
+        print(f"    Peak price:      ${peak_price:,.0f}  ({10**pred_scale:.1f}× support)")
+
+    # Recompute with future bubbles
+    total_bubble_plot_future = total_bubble_plot.copy()
+    for fb in future_bubbles:
+        bub = bubble_shape(years_plot, fb['t_start'], fb['tau_rise'],
+                           fb['t_plateau_dur'], fb['tau_fall'], fb['scale'])
+        total_bubble_plot_future += bub
+    composite_future_plot = 10 ** (log_support_plot + total_bubble_plot_future)
+else:
+    composite_future_plot = composite_plot
+    print("  Not enough bubbles to predict (need ≥ 2).")
+
+print("=" * 80)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PLOTTING HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+exponents = np.arange(-2, 10)
+major_positions = 10.0 ** exponents
+minor_positions = []
+for exp in exponents:
+    for sub in range(2, 10):
+        minor_positions.append(sub * (10.0 ** exp))
+
+every_year = np.arange(1, 43)
+bubble_colors = ['#EF4444', '#F97316', '#EAB308', '#22C55E', '#3B82F6', '#8B5CF6',
+                 '#EC4899', '#14B8A6', '#F43F5E', '#6366F1']
+
+def save_plot(basename):
+    plt.savefig(f'{basename}.svg', format='svg', bbox_inches='tight')
+    plt.savefig(f'{basename}.jpg', format='jpg', bbox_inches='tight', dpi=200)
+
+def add_date_lines(ax_or_plt):
+    if fit_min_years is not None:
+        ax_or_plt.axvline(fit_min_years, color='#10B981', ls='-.', lw=1.5, alpha=0.7)
+    if fit_max_years is not None:
+        ax_or_plt.axvline(fit_max_years, color='#EF4444', ls='-.', lw=1.5, alpha=0.7)
+
+x_tick_values_log = [1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 35, 40]
+combined_labels_log = [f"{y}\n{2009+y}" for y in x_tick_values_log]
+
+
+def plot_bubbles_loglog(ax_or_plt, zoomed=False):
+    """Shared plotting logic for log-log views."""
+    plt.scatter(years_all, y_all, color='#fbbf24', alpha=0.45 if not zoomed else 0.6,
+                s=1 if not zoomed else 6, edgecolor='none', label='Historical Data', zorder=3)
+
+    plt.plot(years_plot, support_plot, color='#3B82F6', ls='--', lw=1.5, zorder=5,
+             label=f'Support (B={B_sup:.3f}, {SUPPORT_PERCENTILE}th %ile)')
+
+    for i, bub in enumerate(individual_bubbles_plot):
+        color = bubble_colors[i % len(bubble_colors)]
+        bubble_price = 10 ** (log_support_plot + bub)
+        mask = bub > 0.001
+        if np.any(mask):
+            plt.plot(years_plot[mask], bubble_price[mask], color=color, ls=':', lw=1.0,
+                     alpha=0.6, label=f'Bubble {i+1}' if i < 8 else None)
+
+    plt.plot(years_plot, composite_future_plot, color='#EF4444', ls='-', lw=1.8, zorder=8,
+             label=f'Composite (R²={r2_composite:.4f})')
+
+    for j, fb in enumerate(future_bubbles):
+        color = bubble_colors[(len(bubble_params) + j) % len(bubble_colors)]
+        bub = bubble_shape(years_plot, fb['t_start'], fb['tau_rise'],
+                           fb['t_plateau_dur'], fb['tau_fall'], fb['scale'])
+        bubble_price = 10 ** (log_support_plot + bub)
+        mask = bub > 0.001
+        if np.any(mask):
+            plt.plot(years_plot[mask], bubble_price[mask], color=color, ls='--', lw=1.5,
+                     alpha=0.8, label=f'Predicted {len(bubble_params)+j+1}')
+
+    plt.axvline(today_years, color='#888888', ls='-', lw=1.0, alpha=0.5, label='Today')
+    add_date_lines(plt)
+
+    plt.gca().yaxis.set_major_locator(FixedLocator(major_positions))
+    plt.gca().yaxis.set_major_formatter(StrMethodFormatter('${x:,.0f}'))
+    plt.gca().yaxis.set_minor_locator(FixedLocator(minor_positions))
+    plt.gca().xaxis.set_minor_formatter(NullFormatter())
+    plt.xticks(x_tick_values_log, combined_labels_log, fontsize=9)
+    plt.gca().xaxis.set_minor_locator(FixedLocator(every_year))
+
+    plt.grid(which='major', axis='both', color='#CCCCCC', linestyle='-', linewidth=0.6, alpha=0.6)
+    plt.grid(which='minor', axis='both', color='#E5E5E5', linestyle='-', linewidth=0.3, alpha=0.4)
+
+    plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
+    plt.ylabel('Bitcoin Price (USD)')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PLOT 1: Log-Log FULL
+# ══════════════════════════════════════════════════════════════════════════════
+plt.figure(figsize=(15, 9))
+plt.gca().set_facecolor('white')
+plt.xscale('log')
+plt.yscale('log')
+plot_bubbles_loglog(plt, zoomed=False)
+plt.ylim(0.01, 1e8)
+plt.title(f'Support + Bubbles ({len(bubble_params)} detected, {N_FUTURE_BUBBLES} predicted)'
+          f' | Gap≤{MAX_BUBBLE_GAP}yr, Sep≥{MIN_INTERBUBBLE_PERIOD}yr — Full View')
+legend = plt.legend(loc='upper left', fontsize=8.5, framealpha=0.95, ncol=2,
+                    edgecolor='#CCCCCC', facecolor='white')
+plt.text(0.98, 0.015,
+         f'bg002h • Support({SUPPORT_PERCENTILE}%ile) + {len(bubble_params)} bubbles'
+         f' | [{MIN_BUBBLES},{MAX_BUBBLES}] bubbles, gap≤{MAX_BUBBLE_GAP}yr, sep≥{MIN_INTERBUBBLE_PERIOD}yr\n'
+         'Data from bitcoinity.org: https://data.bitcoinity.org/markets/price/all/USD?c=e&t=l\n'
+         'DIY@https://github.com/bg002h/BitcoinPowerLawModelExtrapolation',
+         transform=plt.gca().transAxes,
+         fontsize=8, color='#888888', ha='right', va='bottom', alpha=0.9, style='italic')
+plt.tight_layout(pad=1.5)
+save_plot('support_bubbles_loglog')
+plt.show()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PLOT 2: Log-Log ZOOMED (2024–2044)
+# ══════════════════════════════════════════════════════════════════════════════
+plt.figure(figsize=(15, 9))
+plt.gca().set_facecolor('white')
+plt.xscale('log')
+plt.yscale('log')
+plot_bubbles_loglog(plt, zoomed=True)
+plt.ylim(2e4, 3e7)
+plt.xlim(15, 35)
+plt.title(f'Support + Bubbles — Zoomed Projection (2024–2044)')
+legend = plt.legend(loc='upper left', fontsize=8.5, framealpha=0.95, ncol=2,
+                    edgecolor='#CCCCCC', facecolor='white')
+plt.tight_layout(pad=1.5)
+save_plot('support_bubbles_loglog_zoomed')
+plt.show()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PLOT 3: Semi-Log (linear time, log price)
+# ══════════════════════════════════════════════════════════════════════════════
+plt.figure(figsize=(15, 9))
+plt.gca().set_facecolor('white')
+plt.yscale('log')
+
+plt.scatter(years_all, y_all, color='#fbbf24', alpha=0.45, s=1,
+            edgecolor='none', label='Historical Data', zorder=3)
+plt.plot(years_plot, support_plot, color='#3B82F6', ls='--', lw=1.5, zorder=5,
+         label=f'Support')
+plt.plot(years_plot, composite_future_plot, color='#EF4444', ls='-', lw=1.8, zorder=8,
+         label='Composite + predictions')
+
+for i, bub in enumerate(individual_bubbles_plot):
+    color = bubble_colors[i % len(bubble_colors)]
+    bubble_price = 10 ** (log_support_plot + bub)
+    mask = bub > 0.001
+    if np.any(mask):
+        plt.plot(years_plot[mask], bubble_price[mask], color=color, ls=':', lw=1.0, alpha=0.6)
+
+for j, fb in enumerate(future_bubbles):
+    color = bubble_colors[(len(bubble_params) + j) % len(bubble_colors)]
+    bub = bubble_shape(years_plot, fb['t_start'], fb['tau_rise'],
+                       fb['t_plateau_dur'], fb['tau_fall'], fb['scale'])
+    bubble_price = 10 ** (log_support_plot + bub)
+    mask = bub > 0.001
+    if np.any(mask):
+        plt.plot(years_plot[mask], bubble_price[mask], color=color, ls='--', lw=1.5, alpha=0.8)
+
+plt.axvline(today_years, color='#888888', ls='-', lw=1.0, alpha=0.5, label='Today')
+add_date_lines(plt)
+
+plt.gca().yaxis.set_major_locator(FixedLocator(major_positions))
+plt.gca().yaxis.set_major_formatter(StrMethodFormatter('${x:,.0f}'))
+plt.gca().yaxis.set_minor_locator(FixedLocator(minor_positions))
+
+x_ticks_linear = list(range(1, 43, 2))
+x_tick_cal = [f"{y}\n({2009 + y})" for y in x_ticks_linear]
+plt.xticks(x_ticks_linear, x_tick_cal, fontsize=9)
+plt.xlim(1, 42)
+plt.ylim(0.01, 1e8)
+
+plt.grid(which='major', axis='both', color='#CCCCCC', linestyle='-', linewidth=0.6, alpha=0.6)
+plt.grid(which='minor', axis='y', color='#E5E5E5', linestyle='-', linewidth=0.3, alpha=0.4)
+plt.xlabel('Years since Bitcoin genesis (Jan 2009)')
+plt.ylabel('Bitcoin Price (USD) — log scale')
+plt.title('Support + Bubble Components — Semi-Log View')
+legend = plt.legend(loc='upper left', fontsize=9, framealpha=0.95,
+                    edgecolor='#CCCCCC', facecolor='white')
+plt.tight_layout(pad=1.5)
+save_plot('support_bubbles_semilog')
+plt.show()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PLOT 4: Excess above support (bubble decomposition)
+# ══════════════════════════════════════════════════════════════════════════════
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
+
+ax1.scatter(years_all, log_excess_all, color='#94A3B8', alpha=0.25, s=1, label='Daily excess')
+smooth_all = pd.Series(log_excess_all).rolling(SMOOTHING_WINDOW, center=True, min_periods=20).mean().values
+ax1.plot(years_all, smooth_all, color='#2563EB', lw=1.2, label=f'{SMOOTHING_WINDOW}-day smoothed')
+ax1.axhline(0, color='black', lw=1, alpha=0.5)
+ax1.axhline(current_threshold, color='#EF4444', ls=':', lw=1, alpha=0.5,
+            label=f'Final threshold ({current_threshold:.3f})')
+ax1.fill_between(years_all, 0, np.maximum(0, smooth_all),
+                 color='#FEE2E2', alpha=0.4, label='Excess above support')
+ax1.set_ylabel('log₁₀ excess above support')
+ax1.set_title('Raw Excess Above Support Line')
+ax1.legend(loc='upper left', fontsize=8.5)
+ax1.grid(True, alpha=0.3)
+add_date_lines(ax1)
+
+ax2.axhline(0, color='black', lw=1, alpha=0.5)
+for i, bub in enumerate(individual_bubbles_plot):
+    color = bubble_colors[i % len(bubble_colors)]
+    ax2.fill_between(years_plot, 0, bub, color=color, alpha=0.3, label=f'Bubble {i+1}')
+    ax2.plot(years_plot, bub, color=color, lw=1.2)
+
+for j, fb in enumerate(future_bubbles):
+    color = bubble_colors[(len(bubble_params) + j) % len(bubble_colors)]
+    bub = bubble_shape(years_plot, fb['t_start'], fb['tau_rise'],
+                       fb['t_plateau_dur'], fb['tau_fall'], fb['scale'])
+    ax2.fill_between(years_plot, 0, bub, color=color, alpha=0.15)
+    ax2.plot(years_plot, bub, color=color, ls='--', lw=1.2,
+             label=f'Predicted {len(bubble_params)+j+1}')
+
+ax2.plot(years_all, np.maximum(0, smooth_all), color='black', lw=1.0, alpha=0.4,
+         ls=':', label='Actual (smoothed)')
+ax2.set_xlabel('Years since Bitcoin genesis (Jan 2009)')
+ax2.set_ylabel('Bubble component (log₁₀ units)')
+ax2.set_title('Fitted Bubble Components (stacked)')
+ax2.legend(loc='upper left', fontsize=8.5, ncol=2)
+ax2.grid(True, alpha=0.3)
+ax2.axvline(today_years, color='#888888', ls='-', lw=1.0, alpha=0.5)
+add_date_lines(ax2)
+
+plt.tight_layout()
+save_plot('support_bubbles_decomposition')
+plt.show()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PLOT 5: Residuals
+# ══════════════════════════════════════════════════════════════════════════════
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 8), sharex=True)
+
+ax1.scatter(years_all, log_excess_all, color='#94A3B8', alpha=0.2, s=1)
+s_smooth = pd.Series(log_excess_all).rolling(90, center=True, min_periods=30).mean().values
+ax1.plot(years_all, s_smooth, color='#3B82F6', lw=1.5)
+ax1.axhline(0, color='black', lw=1, alpha=0.5)
+ax1.set_ylabel('Residual (log₁₀)')
+ax1.set_title(f'Support-Only Residuals (R² = {r2_support:.4f})')
+ax1.grid(True, alpha=0.3)
+
+comp_resid = log_p_all - composite_pred_all
+ax2.scatter(years_all, comp_resid, color='#94A3B8', alpha=0.2, s=1)
+c_smooth = pd.Series(comp_resid).rolling(90, center=True, min_periods=30).mean().values
+ax2.plot(years_all, c_smooth, color='#EF4444', lw=1.5)
+ax2.axhline(0, color='black', lw=1, alpha=0.5)
+ax2.set_xlabel('Years since Bitcoin genesis (Jan 2009)')
+ax2.set_ylabel('Residual (log₁₀)')
+ax2.set_title(f'Support + Bubbles Residuals (R² = {r2_composite:.4f})')
+ax2.grid(True, alpha=0.3)
+
+max_r = max(np.nanmax(np.abs(s_smooth[~np.isnan(s_smooth)])),
+            np.nanmax(np.abs(c_smooth[~np.isnan(c_smooth)]))) * 1.2
+ax1.set_ylim(-max_r, max_r)
+ax2.set_ylim(-max_r, max_r)
+
+plt.tight_layout()
+save_plot('support_bubbles_residuals')
+plt.show()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FINAL SUMMARY
+# ══════════════════════════════════════════════════════════════════════════════
+print(f"\n{'=' * 80}")
+print("FINAL MODEL SUMMARY")
+print(f"{'=' * 80}")
+print(f"\n  SUPPORT LINE:")
+print(f"    price = {A_sup:.4e} × t^{B_sup:.4f}")
+print(f"    (τ={SUPPORT_QUANTILE} quantile of bottom {SUPPORT_PERCENTILE}% by OLS residual)")
+print(f"\n  CONSTRAINTS:")
+print(f"    Min bubbles:         {MIN_BUBBLES}")
+print(f"    Max bubbles:         {MAX_BUBBLES}")
+print(f"    Max gap:             {MAX_BUBBLE_GAP} yr")
+print(f"    Min separation:      {MIN_INTERBUBBLE_PERIOD} yr")
+print(f"    Detection threshold: {current_threshold:.3f} (initial: {BUBBLE_THRESHOLD:.3f})")
+print(f"\n  DETECTED BUBBLES: {len(bubble_params)}")
+print(f"  PREDICTED FUTURE: {len(future_bubbles)}")
+print(f"\n  COMPOSITE R²: {r2_composite:.6f}")
+print(f"  SUPPORT R²:   {r2_support:.6f}")
+print(f"{'=' * 80}")
